@@ -1,5 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+
+import 'firebase_init.dart';
 
 /// Firestore `leaderboard` — 기록 단위: 도달 층·걸린 시간(초).
 class LeaderboardEntry {
@@ -33,19 +36,27 @@ class LeaderboardService {
     required int elapsedSeconds,
   }) async {
     try {
+      await ensureAnonymousAuthForApp();
       if (Firebase.apps.isEmpty) return;
-      await FirebaseFirestore.instance.collection('leaderboard').add(<String, dynamic>{
-        'playerTag': playerTag,
-        'maxFloor': maxFloor,
-        'elapsedSeconds': elapsedSeconds,
-        'recordedAt': FieldValue.serverTimestamp(),
-      });
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null || uid.isEmpty) return;
+      await FirebaseFirestore.instance.collection('leaderboard').doc(uid).set(
+        <String, dynamic>{
+          'uid': uid,
+          'playerTag': playerTag,
+          'maxFloor': maxFloor,
+          'elapsedSeconds': elapsedSeconds,
+          'recordedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
     } catch (_) {}
   }
 
   /// 층수 우선, 같은 층이면 짧은 시간 순.
   Future<List<LeaderboardEntry>> fetchTop({int limit = 30}) async {
     try {
+      await ensureAnonymousAuthForApp();
       if (Firebase.apps.isEmpty) return [];
       final snap = await FirebaseFirestore.instance
           .collection('leaderboard')

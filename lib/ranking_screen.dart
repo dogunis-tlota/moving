@@ -23,12 +23,11 @@ class _RankingScreenState extends State<RankingScreen> {
 
   Future<void> _load() async {
     final list = await _svc.fetchTop();
-    if (mounted) {
-      setState(() {
-        _rows = list;
-        _loading = false;
-      });
-    }
+    if (!mounted) return;
+    setState(() {
+      _rows = list;
+      _loading = false;
+    });
   }
 
   @override
@@ -41,12 +40,14 @@ class _RankingScreenState extends State<RankingScreen> {
               onRefresh: _load,
               child: _rows == null || _rows!.isEmpty
                   ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
                       children: const [
                         SizedBox(height: 120),
                         Center(child: Text('기록이 없거나 Firebase에 연결되지 않았습니다.')),
                       ],
                     )
                   : ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.all(12),
                       itemCount: _rows!.length,
                       itemBuilder: (context, i) {

@@ -1,33 +1,13 @@
 import 'dart:math' show min;
 
-import 'dart:ui' show Offset, Rect;
+import 'dart:ui' show Rect;
 
 import 'package:flame/components.dart';
 
-import 'game_constants.dart';
-
-/// 맵 중앙 원점 기준(플레이어 `manWorldPos`와 동일) 내부 벽 AABB 목록.
+/// 맵 중앙 원점 기준 내부 벽 AABB 목록. (현재 비어 있음 — 장애물 없음.)
 final List<Rect> kInteriorWorldWalls = _buildWalls();
 
-List<Rect> _buildWalls() {
-  final hw = kMapWidth / 2;
-  final hh = kMapHeight / 2;
-  void addCenter(double cx, double cy, double w, double h, List<Rect> out) {
-    out.add(Rect.fromCenter(center: Offset(cx, cy), width: w, height: h));
-  }
-
-  final out = <Rect>[];
-  // 세로 벽 둘
-  addCenter(-hw * 0.55, 0, 72, hh * 1.1, out);
-  addCenter(hw * 0.52, -hh * 0.12, 68, hh * 0.85, out);
-  // 가로 벽 둘
-  addCenter(0, -hh * 0.48, hw * 0.42, 56, out);
-  addCenter(-hw * 0.08, hh * 0.38, hw * 0.5, 52, out);
-  // 작은 블록
-  addCenter(hw * 0.22, hh * 0.08, 100, 72, out);
-  addCenter(-hw * 0.28, -hh * 0.22, 88, 64, out);
-  return out;
-}
+List<Rect> _buildWalls() => <Rect>[];
 
 bool worldWallOverlapsAabb(
   double centerX,

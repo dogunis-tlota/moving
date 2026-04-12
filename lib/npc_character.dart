@@ -6,6 +6,7 @@ import 'package:flame/components.dart';
 
 import 'game_constants.dart';
 import 'multiplayer/room_models.dart';
+import 'npc_aggression.dart';
 import 'world_walls.dart';
 
 /// 운동장에서 배회하는 NPC — 걷기 / 펀치 / 킥 애니메이션.
@@ -25,11 +26,19 @@ class NpcCharacter extends SpriteAnimationComponent {
   final SpriteAnimation _punchAnim;
   final SpriteAnimation _kickAnim;
 
-  /// 걷는 속도 (월드 픽셀/초). 층에 따라 스폰 시 조정.
-  double wanderSpeed = 90;
+  /// 걷는 속도 (월드 픽셀/초). [FieldGame]이 매 프레임 플레이어와 동일하게 맞춤.
+  double wanderSpeed = kPlayerFieldMoveSpeed;
 
   /// 최대 체력(피해 클램프·HP바 세그먼트). 층에 따라 스폰 시 조정.
   int maxHp = kDefaultMaxHp;
+
+  /// 근접 시 플레이어에게 줄 피해량(랜덤·파워 성향).
+  int meleeDamage = 1;
+
+  NpcAggression aggression = NpcAggression.passive;
+
+  /// [FieldGame]이 매 프레임 플레이어 위치를 넣어 줌(추적·보통 성향).
+  Vector2? chaseTargetWorld;
 
   static const double _minDirectionSeconds = 0.7;
   static const double _maxDirectionSeconds = 2.2;
@@ -37,12 +46,24 @@ class NpcCharacter extends SpriteAnimationComponent {
   final Random _rng = Random();
   Vector2 worldCenter = Vector2(150, -80);
   Vector2? worldHalfBounds;
+  /// 설정 시 세로는 `worldHalfBounds.y` 대신 길 범위로 클램프.
+  double? worldPathMinY;
+  double? worldPathMaxY;
   bool isNetworkDriven = false;
+  /// [FieldGame]에서 보스전 등(0.5) 일 때 이동 속도 배율.
+  double worldSpeedFactor = 1.0;
   Color tintColor = const Color(0xFF7EB6FF);
   final Vector2 _dir = Vector2(1, 0);
   double _directionTimeLeft = 0;
 
+  /// 보통 성향: true면 접근 구간, false면 멈춤 구간.
+  bool _normalApproaching = false;
+  double _normalPhaseTimer = 0;
+
   int health = kDefaultMaxHp;
+
+  /// 펀치 기절 등 — 0보다 크면 이동·공격 불가.
+  double stunSecRemaining = 0;
 
   /// 필드에서 이 NPC가 플레이어를 다시 때리기까지 남은 시간(초).
   double nextAttackIn = 0;
@@ -59,9 +80,14 @@ class NpcCharacter extends SpriteAnimationComponent {
   /// 방금 `beginAttackToward`로 시작한 공격이 킥인지.
   bool get openingAttackIsKick => _openingAttackIsKick;
 
+  void addStun(double seconds) {
+    if (!isAlive || seconds <= 0) return;
+    stunSecRemaining = max(stunSecRemaining, seconds);
+  }
+
   /// 플레이어 쪽을 보며 펀치 또는 킥 모션을 시작한다. 이미 공격 중이면 false.
   bool beginAttackToward(Vector2 targetWorld) {
-    if (!isAlive || _attacking) return false;
+    if (!isAlive || stunSecRemaining > 0 || _attacking) return false;
     final dx = targetWorld.x - worldCenter.x;
     if (dx.abs() > 0.01) {
       scale.x = dx > 0 ? 1.0 : -1.0;
@@ -181,7 +207,6 @@ class NpcCharacter extends SpriteAnimationComponent {
     health = (health - amount).clamp(0, maxHp);
     if (!isAlive) {
       playing = false;
-      opacity = 0.45;
     }
   }
 
@@ -208,6 +233,21 @@ class NpcCharacter extends SpriteAnimationComponent {
   void onMount() {
     super.onMount();
     _pickNewDirection();
+    _normalPhaseTimer =
+        0.6 + _rng.nextDouble() * 0.5;
+  }
+
+  void _clampToField() {
+    final hb = worldHalfBounds;
+    if (hb == null) return;
+    worldCenter.x = worldCenter.x.clamp(-hb.x, hb.x);
+    final pyMin = worldPathMinY;
+    final pyMax = worldPathMaxY;
+    if (pyMin != null && pyMax != null) {
+      worldCenter.y = worldCenter.y.clamp(pyMin, pyMax);
+    } else {
+      worldCenter.y = worldCenter.y.clamp(-hb.y, hb.y);
+    }
   }
 
   @override
@@ -215,29 +255,91 @@ class NpcCharacter extends SpriteAnimationComponent {
     super.update(dt);
     if (!isAlive) return;
 
+    if (stunSecRemaining > 0) {
+      stunSecRemaining = (stunSecRemaining - dt).clamp(0.0, 999.0);
+      if (stunSecRemaining > 0) {
+        paint.colorFilter = const ColorFilter.mode(
+          Color(0xFF000000),
+          BlendMode.srcATop,
+        );
+        _attacking = false;
+        animation = _walkAnim;
+        animationTicker?.currentIndex = 0;
+        playing = false;
+        return;
+      }
+      paint.colorFilter = ColorFilter.mode(tintColor, BlendMode.srcATop);
+    }
+
     if (_attacking) return;
     if (isNetworkDriven) return;
 
-    _directionTimeLeft -= dt;
-    if (_directionTimeLeft <= 0) {
-      _pickNewDirection();
-    }
-
-    final move = _dir * wanderSpeed * dt;
     final hw = size.x * 0.36;
     final hh = size.y * 0.38;
-    tryMoveWithWorldWalls(worldCenter, move.x, move.y, hw, hh);
-    final hb = worldHalfBounds;
-    if (hb != null) {
-      worldCenter.x = worldCenter.x.clamp(-hb.x, hb.x);
-      worldCenter.y = worldCenter.y.clamp(-hb.y, hb.y);
-    }
 
-    if (_dir.x.abs() > 0.1) {
-      scale.x = _dir.x > 0 ? 1.0 : -1.0;
+    switch (aggression) {
+      case NpcAggression.passive:
+        _directionTimeLeft -= dt;
+        if (_directionTimeLeft <= 0) {
+          _pickNewDirection();
+        }
+        final movePassive = _dir * wanderSpeed * worldSpeedFactor * dt;
+        tryMoveWithWorldWalls(
+          worldCenter,
+          movePassive.x,
+          movePassive.y,
+          hw,
+          hh,
+        );
+        _clampToField();
+        if (_dir.x.abs() > 0.1) {
+          scale.x = _dir.x > 0 ? 1.0 : -1.0;
+        }
+        scale.y = 1.0;
+        playing = true;
+        break;
+
+      case NpcAggression.aggressive:
+        final target = chaseTargetWorld;
+        if (target != null) {
+          final to = target - worldCenter;
+          if (to.length2 > 2) {
+            final dir = to.normalized();
+            final move = dir * wanderSpeed * worldSpeedFactor * dt;
+            tryMoveWithWorldWalls(worldCenter, move.x, move.y, hw, hh);
+            scale.x = dir.x >= 0 ? 1.0 : -1.0;
+          }
+        }
+        _clampToField();
+        scale.y = 1.0;
+        playing = true;
+        break;
+
+      case NpcAggression.normal:
+        final targetN = chaseTargetWorld;
+        _normalPhaseTimer -= dt;
+        if (_normalPhaseTimer <= 0) {
+          _normalApproaching = !_normalApproaching;
+          if (_normalApproaching) {
+            _normalPhaseTimer = 1.1 + _rng.nextDouble() * 1.1;
+          } else {
+            _normalPhaseTimer = 0.55 + _rng.nextDouble() * 0.65;
+          }
+        }
+        if (_normalApproaching && targetN != null) {
+          final to = targetN - worldCenter;
+          if (to.length2 > 3) {
+            final dir = to.normalized();
+            final move = dir * wanderSpeed * worldSpeedFactor * dt;
+            tryMoveWithWorldWalls(worldCenter, move.x, move.y, hw, hh);
+            scale.x = dir.x >= 0 ? 1.0 : -1.0;
+          }
+        }
+        _clampToField();
+        scale.y = 1.0;
+        playing = true;
+        break;
     }
-    scale.y = 1.0;
-    playing = true;
   }
 
   void syncScreenPosition(Vector2 cameraTopLeft) {

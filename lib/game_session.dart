@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'boss_reward_skill.dart';
 import 'player_stats.dart';
 import 'revive_manager.dart';
 
@@ -17,4 +18,7 @@ class GameSession {
 
   /// 시작 화면에서 선택된 캐릭터 슬롯 (현재 0만 사용).
   int selectedCharacterIndex = 0;
+
+  /// 보스 처치 후 고른 기술(다음 보스에서 다시 선택 가능).
+  BossRewardSkill? bossRewardSkill;
 }

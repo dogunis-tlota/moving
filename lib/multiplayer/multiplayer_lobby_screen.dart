@@ -73,6 +73,7 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen> {
   }
 
   Future<void> _refreshRooms() async {
+    if (!mounted) return;
     setState(() => _loadingRooms = true);
     try {
       final list = await NetworkSession.listRoomCodesFromDatabase();
@@ -139,7 +140,9 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen> {
       final net = NetworkSession();
       final ok = await net.joinRoom(code: code, playerTag: widget.session.playerTag);
       if (!ok) {
-        setState(() => _error = '입장 실패: 방이 없거나 이미 가득 찼습니다.');
+        if (mounted) {
+          setState(() => _error = '입장 실패: 방이 없거나 이미 가득 찼습니다.');
+        }
         await net.dispose();
         return;
       }
@@ -147,7 +150,9 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen> {
       _pushedGameWithNet = true;
       Navigator.pop(context, net);
     } catch (e) {
-      setState(() => _error = '입장 실패: $e');
+      if (mounted) {
+        setState(() => _error = '입장 실패: $e');
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

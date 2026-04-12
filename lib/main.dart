@@ -42,6 +42,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Moving Man Game',
+      debugShowCheckedModeBanner: false,
       home: const SplashScreen(),
     );
   }
@@ -60,6 +61,7 @@ class GameHost extends StatefulWidget {
 class _GameHostState extends State<GameHost> {
   late final GameSession _session;
   late final ValueNotifier<FieldOverlayHudData> _overlayHud;
+  late final ValueNotifier<String?> _bossBanner;
   late FieldGame _field;
   bool _joinToastShown = false;
   Timer? _runTimer;
@@ -80,14 +82,17 @@ class _GameHostState extends State<GameHost> {
         hpMax: kDefaultMaxHp,
         npcAlive: 0,
         npcTotal: 0,
+        roomNumber: 5,
       ),
     );
+    _bossBanner = ValueNotifier<String?>(null);
     _field = FieldGame(
       session: _session,
       onRequestRevive: _requestRevive,
       onVictory: _onVictory,
       network: widget.network,
       overlayHud: _overlayHud,
+      bossBanner: _bossBanner,
       getRunElapsedSeconds: () => _runSeconds,
       onSinglePlayerRunEnded:
           widget.network == null ? _onSinglePlayerGameOver : null,
@@ -103,6 +108,7 @@ class _GameHostState extends State<GameHost> {
     _runTimer?.cancel();
     _remoteNpcCatchBannerTimer?.cancel();
     _overlayHud.dispose();
+    _bossBanner.dispose();
     widget.network?.remotePlayer.removeListener(_onRemotePlayerChanged);
     final net = widget.network;
     if (net != null) {
@@ -283,6 +289,54 @@ class _GameHostState extends State<GameHost> {
                 ),
               ),
             ),
+            ValueListenableBuilder<String?>(
+              valueListenable: _bossBanner,
+              builder: (context, msg, _) {
+                if (msg == null || msg.isEmpty) return const SizedBox.shrink();
+                return Positioned(
+                  top: 40,
+                  left: 12,
+                  right: 12,
+                  child: SafeArea(
+                    bottom: false,
+                    child: Material(
+                      color: Colors.transparent,
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.82),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: const Color(0xFFE53935)),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.red.withValues(alpha: 0.35),
+                                blurRadius: 18,
+                                spreadRadius: 1,
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            msg,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w800,
+                              height: 1.2,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
             if (widget.network != null && _remoteNpcCatchBanner != null)
               Positioned(
                 top: 0,
@@ -372,8 +426,8 @@ class _GameHostState extends State<GameHost> {
                       'SPD×2 ${h.speedBuffSecRemain}s',
                   ].join(' ');
                   final base = multi
-                      ? 'F${h.floor} HP${h.hp}/${h.hpMax} N${h.npcAlive}/${h.npcTotal} H:${h.hostScore} G:${h.guestScore}'
-                      : 'F${h.floor} HP${h.hp}/${h.hpMax} N${h.npcAlive}/${h.npcTotal}';
+                      ? '방${h.roomNumber} · F${h.floor} HP${h.hp}/${h.hpMax} N${h.npcAlive}/${h.npcTotal} H:${h.hostScore} G:${h.guestScore}'
+                      : '방${h.roomNumber} · F${h.floor} HP${h.hp}/${h.hpMax} N${h.npcAlive}/${h.npcTotal}';
                   final mid = buff.isEmpty ? '' : ' · $buff';
                   final tail =
                       h.remoteShort.isNotEmpty ? ' · ${h.remoteShort}' : '';

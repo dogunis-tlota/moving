@@ -42,6 +42,8 @@ class PlayerNetState {
     required this.updatedAtMs,
     this.score = 0,
     this.floor = 1,
+    this.roomRx = 1,
+    this.roomRy = 1,
   });
 
   final double x;
@@ -54,6 +56,10 @@ class PlayerNetState {
   final int score;
   /// 멀티: 현재 도전 중인 층.
   final int floor;
+  /// 멀티: 격자 방 X (0…2).
+  final int roomRx;
+  /// 멀티: 격자 방 Y (0…2).
+  final int roomRy;
 
   Map<String, dynamic> toMap() => <String, dynamic>{
     'x': x,
@@ -64,6 +70,8 @@ class PlayerNetState {
     'updatedAtMs': updatedAtMs,
     'score': score,
     'floor': floor,
+    'roomRx': roomRx,
+    'roomRy': roomRy,
   };
 
   static PlayerNetState fromMap(Map<dynamic, dynamic> map) {
@@ -76,6 +84,8 @@ class PlayerNetState {
       updatedAtMs: (map['updatedAtMs'] as num?)?.toInt() ?? 0,
       score: (map['score'] as num?)?.toInt() ?? 0,
       floor: (map['floor'] as num?)?.toInt() ?? 1,
+      roomRx: (map['roomRx'] as num?)?.toInt() ?? 1,
+      roomRy: (map['roomRy'] as num?)?.toInt() ?? 1,
     );
   }
 }
