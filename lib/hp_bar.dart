@@ -3,12 +3,17 @@ import 'package:flutter/material.dart';
 
 import 'game_constants.dart';
 
-/// 플레이어 발밑 화면 좌표에 맞추는 체력바. 가로 길이는 스프라이트 너비와 동일, [kDefaultMaxHp]칸.
+/// 플레이어 발밑 화면 좌표에 맞추는 체력바. 가로 길이는 스프라이트 너비와 동일, [segmentCount]칸.
 /// [앵커 topCenter] — `playerCenter`와 가로 정렬, 세로는 스프라이트 하단 아래 [feetGap].
 class HpBar extends PositionComponent {
-  HpBar() : super(anchor: Anchor.topCenter, priority: 10000);
+  HpBar({int? segmentCount})
+      : segmentCount = segmentCount ?? kDefaultMaxHp,
+        filled = segmentCount ?? kDefaultMaxHp,
+        super(anchor: Anchor.topCenter, priority: 10000);
 
-  int filled = kDefaultMaxHp;
+  int segmentCount;
+  int filled;
+  String? label;
 
   static const double feetGap = 10;
 
@@ -23,7 +28,7 @@ class HpBar extends PositionComponent {
   final Paint _empty = Paint()..color = const Color(0xFF2A3D2E);
 
   void setFilled(int value) {
-    filled = value.clamp(0, kDefaultMaxHp);
+    filled = value.clamp(0, segmentCount);
   }
 
   /// 플레이어 `Anchor.center` 기준 화면 위치·크기.
@@ -40,7 +45,22 @@ class HpBar extends PositionComponent {
 
   @override
   void render(Canvas canvas) {
-    final n = kDefaultMaxHp;
+    if (label != null && label!.isNotEmpty) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset((size.x - tp.width) / 2, -tp.height - 4));
+    }
+
+    final n = segmentCount;
     final totalGaps = (n - 1) * _gapPx;
     final segW = (size.x - totalGaps) / n;
     final h = size.y;

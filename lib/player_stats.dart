@@ -1,22 +1,48 @@
-/// 상점 아이템 (한 번에 하나만 선택).
-enum ShopItem { powerUp, speedUp, heal }
+import 'game_constants.dart';
 
-/// 플레이어 강화 (파워업 / 이동속도).
+/// 플레이어 강화 (파워업 / 이동속도) + 필드 픽업(30초 2배).
 class PlayerStats {
   double powerMultiplier = 1;
   double speedMultiplier = 1;
 
-  int get punchDamage => (1 * powerMultiplier).ceil().clamp(1, 99);
-  int get kickDamage => (1 * powerMultiplier).ceil().clamp(1, 99);
+  double _powerBuffSec = 0;
+  double _speedBuffSec = 0;
 
-  void applyShopItem(ShopItem item) {
-    switch (item) {
-      case ShopItem.powerUp:
-        powerMultiplier += 0.35;
-      case ShopItem.speedUp:
-        speedMultiplier += 0.25;
-      case ShopItem.heal:
-        break; // HP 회복은 PlayerCharacter에서 처리
+  void tickBuffs(double dt) {
+    if (_powerBuffSec > 0) {
+      _powerBuffSec -= dt;
+      if (_powerBuffSec < 0) _powerBuffSec = 0;
+    }
+    if (_speedBuffSec > 0) {
+      _speedBuffSec -= dt;
+      if (_speedBuffSec < 0) _speedBuffSec = 0;
     }
   }
+
+  /// 남은 초(올림, HUD용).
+  int get powerBuffRemainingSecCeil =>
+      _powerBuffSec > 0 ? _powerBuffSec.ceil() : 0;
+  int get speedBuffRemainingSecCeil =>
+      _speedBuffSec > 0 ? _speedBuffSec.ceil() : 0;
+
+  void activatePowerBuff([double sec = kPickupBuffDurationSec]) {
+    _powerBuffSec = sec;
+  }
+
+  void activateSpeedBuff([double sec = kPickupBuffDurationSec]) {
+    _speedBuffSec = sec;
+  }
+
+  bool get _powerBoostActive => _powerBuffSec > 0;
+  bool get _speedBoostActive => _speedBuffSec > 0;
+
+  double get _powerScale =>
+      powerMultiplier * (_powerBoostActive ? 2.0 : 1.0);
+  double get effectiveSpeedScale =>
+      speedMultiplier * (_speedBoostActive ? 2.0 : 1.0);
+
+  int get punchDamage =>
+      (1 * _powerScale).ceil().clamp(1, 99);
+  int get kickDamage =>
+      (1 * _powerScale).ceil().clamp(1, 99);
 }

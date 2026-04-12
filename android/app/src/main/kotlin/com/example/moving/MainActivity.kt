@@ -1,4 +1,4 @@
-package com.example.moving
+package com.marucompany.floorup
 
 import io.flutter.embedding.android.FlutterActivity
 

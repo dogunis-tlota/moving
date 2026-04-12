@@ -1,0 +1,33 @@
+{
+  "rules": {
+    "userActiveRooms": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "rooms": {
+      "$roomCode": {
+        ".read": "auth != null",
+        ".write": "auth != null && (!data.exists() && newData.child('hostPlayerId').val() === auth.uid || data.exists() && !newData.exists() && (data.child('hostPlayerId').val() === auth.uid || data.child('guestPlayerId').val() === auth.uid) || data.exists() && newData.exists() && (data.child('hostPlayerId').val() === auth.uid || data.child('guestPlayerId').val() === auth.uid || newData.child('guestPlayerId').val() === auth.uid && (!data.child('guestPlayerId').exists() || data.child('guestPlayerId').val() === '')))",
+        "players": {
+          "$playerId": {
+            ".write": "auth != null && auth.uid === $playerId"
+          }
+        },
+        "world": {
+          ".write": "auth != null && root.child('rooms').child($roomCode).child('hostPlayerId').val() === auth.uid"
+        },
+        "hostPlayerId": {
+          ".write": "auth != null && !data.exists()"
+        },
+        "guestPlayerId": {
+          ".write": "auth != null"
+        },
+        "$other": {
+          ".write": "auth != null"
+        }
+      }
+    }
+  }
+}

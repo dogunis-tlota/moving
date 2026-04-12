@@ -3,6 +3,7 @@ import 'package:flame/components.dart';
 
 import 'boss_character.dart';
 import 'game_constants.dart';
+import 'multiplayer/room_models.dart';
 import 'npc_character.dart';
 
 /// 플레이어 스프라이트: 걷기 / 펀치 / 킥 애니메이션 전환.
@@ -24,8 +25,10 @@ class PlayerCharacter extends SpriteAnimationComponent {
   int health = kDefaultMaxHp;
 
   bool _attacking = false;
+  AvatarAction _action = AvatarAction.idle;
 
   bool get isAttacking => _attacking;
+  AvatarAction get action => _action;
 
   static Future<PlayerCharacter> load(Images images) async {
     Future<SpriteAnimation> strip(
@@ -57,7 +60,7 @@ class PlayerCharacter extends SpriteAnimationComponent {
     final frameSize = Vector2(
       walk.frames.first.sprite.srcSize.x,
       walk.frames.first.sprite.srcSize.y,
-    );
+    )..scale(kCharacterScale);
 
     return PlayerCharacter._(
       walk: walk,
@@ -71,15 +74,36 @@ class PlayerCharacter extends SpriteAnimationComponent {
     Vector2 playerWorldCenter,
     double facingX,
     NpcCharacter? npc, {
-    required double range,
+    required double reachSpriteWidths,
     required int damage,
   }) {
     if (npc == null || !npc.isAlive) return;
     final d = playerWorldCenter.distanceTo(npc.worldCenter);
-    if (d > range) return;
+    final halfSum = (size.x + npc.size.x) * 0.5;
+    final closeRange = halfSum + size.x * reachSpriteWidths;
+    if (d > closeRange) return;
     final dx = npc.worldCenter.x - playerWorldCenter.x;
     if (dx.abs() >= 0.01 && dx.sign != facingX.sign) return;
     npc.takeDamage(damage);
+  }
+
+  void _tryHitNpcs(
+    Vector2 playerWorldCenter,
+    double facingX,
+    List<NpcCharacter>? npcs, {
+    required double reachSpriteWidths,
+    required int damage,
+  }) {
+    if (npcs == null) return;
+    for (final npc in npcs) {
+      _tryHitNpc(
+        playerWorldCenter,
+        facingX,
+        npc,
+        reachSpriteWidths: reachSpriteWidths,
+        damage: damage,
+      );
+    }
   }
 
   void _tryHitBoss(
@@ -87,11 +111,13 @@ class PlayerCharacter extends SpriteAnimationComponent {
     double facingX,
     Vector2? bossWorld,
     BossCharacter? boss, {
-    required double range,
+    required double reachSpriteWidths,
     required int damage,
   }) {
     if (bossWorld == null || boss == null || !boss.isAlive) return;
-    if (playerWorldCenter.distanceTo(bossWorld) > range) return;
+    final halfSum = (size.x + boss.size.x) * 0.5;
+    final closeRange = halfSum + size.x * reachSpriteWidths;
+    if (playerWorldCenter.distanceTo(bossWorld) > closeRange) return;
     final dx = bossWorld.x - playerWorldCenter.x;
     if (dx.abs() >= 0.01 && dx.sign != facingX.sign) return;
     boss.takeDamage(damage);
@@ -101,21 +127,22 @@ class PlayerCharacter extends SpriteAnimationComponent {
   bool tryPunch(
     Vector2 playerWorldCenter,
     double facingX, {
-    NpcCharacter? npc,
+    List<NpcCharacter>? npcs,
     BossCharacter? boss,
     Vector2? bossWorldCenter,
     required int damage,
   }) {
     if (_attacking) return false;
     _attacking = true;
+    _action = AvatarAction.punch;
     animation = _punchAnim;
     animationTicker?.reset();
     playing = true;
-    _tryHitNpc(
+    _tryHitNpcs(
       playerWorldCenter,
       facingX,
-      npc,
-      range: kPunchHitRange,
+      npcs,
+      reachSpriteWidths: kPunchReachSpriteWidths,
       damage: damage,
     );
     _tryHitBoss(
@@ -123,7 +150,7 @@ class PlayerCharacter extends SpriteAnimationComponent {
       facingX,
       bossWorldCenter,
       boss,
-      range: kPunchHitRange,
+      reachSpriteWidths: kPunchReachSpriteWidths,
       damage: damage,
     );
     return true;
@@ -133,21 +160,22 @@ class PlayerCharacter extends SpriteAnimationComponent {
   bool tryKick(
     Vector2 playerWorldCenter,
     double facingX, {
-    NpcCharacter? npc,
+    List<NpcCharacter>? npcs,
     BossCharacter? boss,
     Vector2? bossWorldCenter,
     required int damage,
   }) {
     if (_attacking) return false;
     _attacking = true;
+    _action = AvatarAction.kick;
     animation = _kickAnim;
     animationTicker?.reset();
     playing = true;
-    _tryHitNpc(
+    _tryHitNpcs(
       playerWorldCenter,
       facingX,
-      npc,
-      range: kKickHitRange,
+      npcs,
+      reachSpriteWidths: kKickReachSpriteWidths,
       damage: damage,
     );
     _tryHitBoss(
@@ -155,7 +183,7 @@ class PlayerCharacter extends SpriteAnimationComponent {
       facingX,
       bossWorldCenter,
       boss,
-      range: kKickHitRange,
+      reachSpriteWidths: kKickReachSpriteWidths,
       damage: damage,
     );
     return true;
@@ -168,6 +196,43 @@ class PlayerCharacter extends SpriteAnimationComponent {
     animation = _walkAnim;
     animationTicker?.reset();
     playing = false;
+    _action = AvatarAction.idle;
+  }
+
+  void playRemoteAction(AvatarAction action) {
+    if (action == AvatarAction.punch) {
+      _attacking = true;
+      _action = AvatarAction.punch;
+      animation = _punchAnim;
+      animationTicker?.reset();
+      playing = true;
+      return;
+    }
+    if (action == AvatarAction.kick) {
+      _attacking = true;
+      _action = AvatarAction.kick;
+      animation = _kickAnim;
+      animationTicker?.reset();
+      playing = true;
+      return;
+    }
+    if (action == AvatarAction.grab) {
+      _attacking = true;
+      _action = AvatarAction.grab;
+      animation = _punchAnim;
+      animationTicker?.reset();
+      playing = true;
+      return;
+    }
+    _attacking = false;
+    _action = action;
+    animation = _walkAnim;
+    if (action == AvatarAction.idle) {
+      playing = false;
+      animationTicker?.currentIndex = 0;
+    } else {
+      playing = true;
+    }
   }
 
   void takeDamage(int amount) {

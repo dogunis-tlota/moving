@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "312031209328",
+    "project_id": "maru-moving-game",
+    "storage_bucket": "maru-moving-game.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:312031209328:android:c89aae0ccdc12f649e51b5",
+        "android_client_info": {
+          "package_name": "com.marucompany.floorup"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCKRqkTCuwVkbOAxhX3Ujm7WXhFUqyHy7c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
