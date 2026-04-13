@@ -13,7 +13,6 @@ import 'game_session.dart';
 import 'firebase_player_repository.dart';
 import 'grass_field_layer.dart';
 import 'hp_bar.dart';
-import 'multiplayer_guest_character.dart';
 import 'multiplayer_guest_local_character.dart';
 import 'multiplayer_host_character.dart';
 import 'npc_character.dart';
@@ -95,6 +94,7 @@ class FieldOverlayHudData {
     this.guestScore,
     this.powerBuffSecRemain = 0,
     this.speedBuffSecRemain = 0,
+    this.hideFloorInHud = false,
   });
 
   final int floor;
@@ -109,6 +109,8 @@ class FieldOverlayHudData {
   final int? guestScore;
   final int powerBuffSecRemain;
   final int speedBuffSecRemain;
+  /// 멀티 PvP: HUD에서 층(F) 표시 생략.
+  final bool hideFloorInHud;
 
   @override
   bool operator ==(Object other) =>
@@ -124,7 +126,8 @@ class FieldOverlayHudData {
           hostScore == other.hostScore &&
           guestScore == other.guestScore &&
           powerBuffSecRemain == other.powerBuffSecRemain &&
-          speedBuffSecRemain == other.speedBuffSecRemain;
+          speedBuffSecRemain == other.speedBuffSecRemain &&
+          hideFloorInHud == other.hideFloorInHud;
 
   @override
   int get hashCode => Object.hash(
@@ -139,6 +142,7 @@ class FieldOverlayHudData {
         guestScore,
         powerBuffSecRemain,
         speedBuffSecRemain,
+        hideFloorInHud,
       );
 }
 
@@ -168,13 +172,19 @@ class FieldGame extends FlameGame with KeyboardEvents {
   final void Function(int floor, int elapsedSec)? onSinglePlayerRunEnded;
 
   late PlayerCharacter player;
-  NpcCharacter? remotePlayer;
+  /// PvP: 상대 UID → 캐릭터(플레이어와 동일 스프라이트).
+  final Map<String, PlayerCharacter> _remoteActors = {};
+  final Map<String, HpBar> _remoteHpBars = {};
+  final Map<String, Vector2> _remoteRenderPos = {};
+  final Map<String, AvatarAction> _remoteActionSeen = {};
+  final Map<String, AvatarAction> _hostBossHitSeenAction = {};
+  final Map<String, int> _remotePrevHp = {};
+  final Set<String> _remoteActorsLoading = {};
   final List<NpcCharacter> _npcs = [];
   final List<HpBar> _npcHpBars = [];
   final List<_PickupBlob> _pickups = [];
 
   late HpBar hpBar;
-  HpBar? remoteHpBar;
   GrassFieldLayer? grassField;
 
   BossCharacter? _boss;
@@ -187,10 +197,7 @@ class FieldGame extends FlameGame with KeyboardEvents {
   final Vector2 _keyVelocity = Vector2.zero();
   final Vector2 _touchVelocity = Vector2.zero();
   Vector2 manWorldPos = Vector2.zero();
-  Vector2 remoteWorldPos = Vector2.zero();
   double facingX = 1;
-  double remoteFacingX = 1;
-  AvatarAction _remoteLastAction = AvatarAction.idle;
 
   bool _deathBusy = false;
   bool _floorBusy = false;
@@ -203,8 +210,7 @@ class FieldGame extends FlameGame with KeyboardEvents {
   BossRewardSkill? get _rewardSkill => session.bossRewardSkill;
   bool get _isHost => network?.isHost ?? true;
   int _prevAliveNpcCount = 0;
-  bool _healedAfterRemoteDown = false;
-  String _remoteName = '';
+  String _remoteHudLabel = '';
   /// 격자 방 (0…2). 시작은 중앙 (1,1).
   int _roomX = 1;
   int _roomY = 1;
@@ -215,11 +221,14 @@ class FieldGame extends FlameGame with KeyboardEvents {
   int _roomWaveIndex = 1;
   double _roomWaveSpawnDelay = kNpcRoomFirstSpawnDelaySec;
   bool _npcWaveSpawnBusy = false;
+  bool _pvpBossVisualLoading = false;
 
   Vector2 get _halfBounds => Vector2(kMapWidth / 2, kMapHeight / 2);
 
   double get _bossFightMoveFactor =>
-      (_boss != null && _boss!.isAlive) ? kBossFightMoveSpeedFactor : 1.0;
+      _isMulti
+          ? 1.0
+          : ((_boss != null && _boss!.isAlive) ? kBossFightMoveSpeedFactor : 1.0);
 
   (double hw, double hh) get _playerWallHalf =>
       (player.size.x * 0.38, player.size.y * 0.42);
@@ -296,6 +305,114 @@ class FieldGame extends FlameGame with KeyboardEvents {
     }
     final pick = candidates[_rng.nextInt(candidates.length)];
     return Vector2(pick.x, pick.y);
+  }
+
+  void _clearPickups() {
+    for (final p in _pickups) {
+      remove(p);
+    }
+    _pickups.clear();
+  }
+
+  void _spawnPvpBossLootNear(Vector2 origin) {
+    final cam = _cameraTopLeft();
+    const spread = 64.0;
+    _addPickupBlob(
+      _clampPickupWorld(origin + Vector2(-spread * 0.45, 0)),
+      _PickupKind.power,
+      cam,
+    );
+    _addPickupBlob(
+      _clampPickupWorld(origin + Vector2(spread * 0.45, 0)),
+      _PickupKind.speed,
+      cam,
+    );
+  }
+
+  Vector2 _clampPickupWorld(Vector2 wc) {
+    wc.x = wc.x.clamp(-_halfBounds.x, _halfBounds.x);
+    wc.y = wc.y.clamp(kPathMinWorldY, kPathMaxWorldY);
+    resolveWorldWallsForCenter(wc, 22, 22);
+    return wc;
+  }
+
+  void _addPickupBlob(Vector2 wc, _PickupKind kind, Vector2 cam) {
+    final blob = _PickupBlob(worldCenter: wc.clone(), kind: kind);
+    blob.syncCam(cam);
+    add(blob);
+    _pickups.add(blob);
+  }
+
+  Future<void> _spawnPvpBoss() async {
+    if (!_isMulti || !_isHost || _boss != null || _floorBusy) return;
+    _floorBusy = true;
+    try {
+      final boss = await BossCharacter.loadForPvp(images, player.size);
+      boss.worldHalfBounds = _halfBounds;
+      boss.worldPathMinY = kPathMinWorldY;
+      boss.worldPathMaxY = kPathMaxWorldY;
+      boss.worldCenter.setFrom(_randomBossSpawnNearDoor());
+      final bh = (boss.size.x * 0.36, boss.size.y * 0.38);
+      for (var t = 0; t < 12; t++) {
+        if (!worldWallOverlapsAabb(
+          boss.worldCenter.x,
+          boss.worldCenter.y,
+          bh.$1,
+          bh.$2,
+        )) {
+          break;
+        }
+        boss.worldCenter.setFrom(_randomBossSpawnNearDoor());
+      }
+      resolveWorldWallsForCenter(boss.worldCenter, bh.$1, bh.$2);
+      add(boss);
+      _boss = boss;
+      _bossNextAttackIn = 0.4;
+      final bar = HpBar(segmentCount: boss.maxHp)..label = '보스';
+      bar.setFilled(boss.hp);
+      add(bar);
+      _bossHpBar = bar;
+
+      bossBanner?.value = '보스 등장!';
+      _bossBannerClearTimer?.cancel();
+      _bossBannerClearTimer = Timer(const Duration(seconds: 3), () {
+        bossBanner?.value = null;
+      });
+      await network!.publishWorld(
+        WorldNetState(
+          floor: session.currentFloor,
+          npcs: const <NpcNetState>[],
+          boss: BossNetState(
+            x: boss.worldCenter.x,
+            y: boss.worldCenter.y,
+            hp: boss.hp,
+            alive: boss.isAlive,
+            action: boss.action,
+          ),
+          victory: false,
+        ),
+      );
+    } finally {
+      _floorBusy = false;
+    }
+  }
+
+  Future<void> _onPvpBossDefeated(Vector2 deathWorldPos) async {
+    if (_isHost) {
+      await network!.publishWorld(
+        WorldNetState(
+          floor: session.currentFloor,
+          npcs: const <NpcNetState>[],
+          boss: null,
+          victory: false,
+        ),
+      );
+    }
+    _spawnPvpBossLootNear(deathWorldPos);
+    _myScore += 30;
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (!isLoaded || !_isMulti || !_isHost) return;
+    await _spawnPvpBoss();
   }
 
   Future<void> _spawnFieldBoss() async {
@@ -400,13 +517,6 @@ class FieldGame extends FlameGame with KeyboardEvents {
     return false;
   }
 
-  void _clearPickups() {
-    for (final p in _pickups) {
-      remove(p);
-    }
-    _pickups.clear();
-  }
-
   void _clearNpcs() {
     _clearPickups();
     for (final b in _npcHpBars) {
@@ -441,6 +551,19 @@ class FieldGame extends FlameGame with KeyboardEvents {
   }
 
   Future<void> _spawnFloorNpcs() async {
+    if (_isMulti) {
+      _removeBossIfAny();
+      _clearNpcs();
+      _clearPickups();
+      _roomWaveIndex = 0;
+      _roomWaveSpawnDelay = 0;
+      _npcWaveSpawnBusy = false;
+      _prevAliveNpcCount = 0;
+      if (_isHost) {
+        unawaited(_spawnPvpBoss());
+      }
+      return;
+    }
     _removeBossIfAny();
     _clearNpcs();
     _roomWaveIndex = 1;
@@ -456,13 +579,6 @@ class FieldGame extends FlameGame with KeyboardEvents {
     npc.meleeDamage = 1 + _rng.nextInt(3);
     npc.maxHp = npcMaxHpForFloor(floor);
     npc.health = npc.maxHp;
-    npc.tintColor = HSVColor.fromAHSV(
-      1,
-      _rng.nextDouble() * 360,
-      0.65 + _rng.nextDouble() * 0.25,
-      0.85 + _rng.nextDouble() * 0.12,
-    ).toColor();
-    npc.paint.colorFilter = ColorFilter.mode(npc.tintColor, BlendMode.srcATop);
   }
 
   Future<void> _spawnNpcWaveBatch(int batchSize) async {
@@ -529,6 +645,17 @@ class FieldGame extends FlameGame with KeyboardEvents {
   }
 
   void _tryProgressRoomNpcWaves(double dt) {
+    if (_isMulti) {
+      if (!_isHost) return;
+      if (_floorBusy || _npcWaveSpawnBusy) return;
+      final wb = network!.world.value.boss;
+      if (_boss != null && (wb == null || !wb.alive) && !_floorBusy) {
+        final deathPos = _boss!.worldCenter.clone();
+        _removeBossIfAny();
+        unawaited(_onPvpBossDefeated(deathPos));
+      }
+      return;
+    }
     if (_floorBusy || _npcWaveSpawnBusy) return;
     if (_roomWaveIndex == 0) return;
 
@@ -649,6 +776,143 @@ class FieldGame extends FlameGame with KeyboardEvents {
     _rebuildVelocity();
   }
 
+  void _applyPvpMeleeHits({required bool kick}) {
+    final net = network;
+    if (net == null) return;
+    final dmg = kick ? session.stats.kickDamage : session.stats.punchDamage;
+    final reach =
+        kick ? kKickReachSpriteWidths : kPunchReachSpriteWidths;
+    for (final e in net.remotePlayers.value.entries) {
+      final id = e.key;
+      final st = e.value;
+      if (st.hp <= 0) continue;
+      if (st.roomRx != _roomX || st.roomRy != _roomY) continue;
+      final target = Vector2(st.x, st.y);
+      final d = manWorldPos.distanceTo(target);
+      final halfSum = (player.size.x + player.size.x) * 0.5;
+      final closeRange = halfSum + player.size.x * reach;
+      if (d > closeRange) continue;
+      final dx = target.x - manWorldPos.x;
+      if (dx.abs() >= 0.01 && dx.sign != facingX.sign) continue;
+      unawaited(net.damagePlayer(id, dmg));
+    }
+    final boss = _boss;
+    if (_isHost && boss != null && boss.isAlive) {
+      final d = manWorldPos.distanceTo(boss.worldCenter);
+      final halfSum = (player.size.x + boss.size.x) * 0.5;
+      final closeRange = halfSum + player.size.x * reach;
+      if (d <= closeRange) {
+        final dx = boss.worldCenter.x - manWorldPos.x;
+        if (dx.abs() < 0.01 || dx.sign == facingX.sign) {
+          boss.takeDamage(dmg);
+          unawaited(net.damageBoss(dmg));
+        }
+      }
+    }
+  }
+
+  bool _canHitBossFrom(
+    Vector2 attackerWorld,
+    double facingDir,
+    double reachSpriteWidths,
+  ) {
+    final boss = _boss;
+    if (boss == null || !boss.isAlive) return false;
+    final d = attackerWorld.distanceTo(boss.worldCenter);
+    final halfSum = (player.size.x + boss.size.x) * 0.5;
+    final closeRange = halfSum + player.size.x * reachSpriteWidths;
+    if (d > closeRange) return false;
+    final dx = boss.worldCenter.x - attackerWorld.x;
+    if (dx.abs() >= 0.01 && dx.sign != facingDir.sign) return false;
+    return true;
+  }
+
+  Vector2 _bossTargetWorld() {
+    if (!_isMulti) return manWorldPos;
+    final all = network!.allPlayers.value;
+    var best = manWorldPos;
+    var bestD2 = double.infinity;
+    for (final e in all.entries) {
+      final st = e.value;
+      if (st.roomRx != _roomX || st.roomRy != _roomY || st.hp <= 0) continue;
+      final p = Vector2(st.x, st.y);
+      final d2 = (_boss?.worldCenter ?? Vector2.zero()).distanceToSquared(p);
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  void _applyLocalDamage(int amount) {
+    if (amount <= 0) return;
+    player.takeDamage(amount);
+    if (_isMulti) {
+      unawaited(network!.setLocalPlayerHp(player.health));
+    }
+  }
+
+  Future<void> _syncPvpBossFromWorld() async {
+    if (!_isMulti) return;
+    final wb = network!.world.value.boss;
+    if (wb == null || !wb.alive) {
+      _removeBossIfAny();
+      return;
+    }
+    if (_boss == null) {
+      if (_pvpBossVisualLoading) return;
+      _pvpBossVisualLoading = true;
+      try {
+        final boss = await BossCharacter.loadForPvp(images, player.size);
+        if (!isLoaded) return;
+        add(boss);
+        _boss = boss;
+        final bar = HpBar(segmentCount: boss.maxHp)..label = '보스';
+        add(bar);
+        _bossHpBar = bar;
+      } finally {
+        _pvpBossVisualLoading = false;
+      }
+    }
+    final b = _boss;
+    if (b == null) return;
+    b.worldHalfBounds = _halfBounds;
+    b.worldPathMinY = kPathMinWorldY;
+    b.worldPathMaxY = kPathMaxWorldY;
+    b.worldCenter.setValues(wb.x, wb.y);
+    b.hp = wb.hp.clamp(0, b.maxHp);
+    if (wb.action == AvatarAction.punch || wb.action == AvatarAction.kick) {
+      b.beginAttackToward(manWorldPos);
+    } else {
+      b.finishAttackIfNeeded();
+    }
+  }
+
+  Future<void> _addRemotePlayerCharacter(String id) async {
+    try {
+      final c = await PlayerCharacter.load(images);
+      if (!isLoaded) {
+        remove(c);
+        return;
+      }
+      final net = network;
+      if (net == null || !net.remotePlayers.value.containsKey(id)) {
+        remove(c);
+        return;
+      }
+      c.opacity = 0;
+      add(c);
+      _remoteActors[id] = c;
+      final bar = HpBar()..label = 'PVP';
+      bar.position.setValues(-9999, -9999);
+      add(bar);
+      _remoteHpBars[id] = bar;
+    } finally {
+      _remoteActorsLoading.remove(id);
+    }
+  }
+
   void triggerPunch() {
     if (!isLoaded) return;
     if (_attackComboRunning) return;
@@ -666,11 +930,12 @@ class FieldGame extends FlameGame with KeyboardEvents {
       manWorldPos,
       facingX,
       npcs: _npcs,
-      boss: _boss,
-      bossWorldCenter: _boss?.worldCenter,
+      boss: _isMulti ? null : _boss,
+      bossWorldCenter: _isMulti ? null : _boss?.worldCenter,
       damage: session.stats.punchDamage,
     );
     if (_isMulti) {
+      _applyPvpMeleeHits(kick: false);
       final kills = _countNpcKills(beforeHp);
       if (kills > 0) {
         _myScore += kills * 10;
@@ -726,8 +991,8 @@ class FieldGame extends FlameGame with KeyboardEvents {
       manWorldPos,
       facingX,
       npcs: _npcs,
-      boss: _boss,
-      bossWorldCenter: _boss?.worldCenter,
+      boss: _isMulti ? null : _boss,
+      bossWorldCenter: _isMulti ? null : _boss?.worldCenter,
       damage: session.stats.kickDamage,
     );
     for (var i = 0; i < _npcs.length; i++) {
@@ -741,6 +1006,7 @@ class FieldGame extends FlameGame with KeyboardEvents {
       _knockBossFromPlayer();
     }
     if (_isMulti) {
+      _applyPvpMeleeHits(kick: true);
       final kills = _countNpcKills(beforeHp);
       if (kills > 0) {
         _myScore += kills * 10;
@@ -759,11 +1025,12 @@ class FieldGame extends FlameGame with KeyboardEvents {
           manWorldPos,
           facingX,
           npcs: _npcs,
-          boss: _boss,
-          bossWorldCenter: _boss?.worldCenter,
+          boss: _isMulti ? null : _boss,
+          bossWorldCenter: _isMulti ? null : _boss?.worldCenter,
           damage: session.stats.kickDamage,
         );
         if (_isMulti) {
+          _applyPvpMeleeHits(kick: true);
           final kills = _countNpcKills(beforeHp);
           if (kills > 0) {
             _myScore += kills * 10;
@@ -839,37 +1106,9 @@ class FieldGame extends FlameGame with KeyboardEvents {
     try {
       _removeBossIfAny();
       if (session.currentFloor >= kMaxFloor) {
-        if (_isMulti) {
-          final remote = network!.remotePlayer.value;
-          final myFloor = session.currentFloor;
-          final myScore = _myScore;
-          final theirFloor = remote?.floor ?? 1;
-          final theirScore = remote?.score ?? 0;
-          final String winner;
-          if (myFloor > theirFloor) {
-            winner = session.playerTag;
-          } else if (theirFloor > myFloor) {
-            winner = _remoteName.isEmpty
-                ? (network!.isHost ? 'GUEST' : 'HOST')
-                : _remoteName;
-          } else if (myScore > theirScore) {
-            winner = session.playerTag;
-          } else if (theirScore > myScore) {
-            winner = _remoteName.isEmpty
-                ? (network!.isHost ? 'GUEST' : 'HOST')
-                : _remoteName;
-          } else {
-            winner = 'DRAW';
-          }
-          final hostPts = network!.isHost ? myScore : theirScore;
-          final guestPts = network!.isHost ? theirScore : myScore;
-          await network!.finishMatch(
-            hostScore: hostPts,
-            guestScore: guestPts,
-            winnerTag: winner,
-          );
+        if (!_isMulti) {
+          await onVictory();
         }
-        await onVictory();
         session.currentFloor = 1;
         _myScore = 0;
         _healFullOnWin();
@@ -888,6 +1127,12 @@ class FieldGame extends FlameGame with KeyboardEvents {
 
   void _runDeathFlow() {
     if (_deathBusy || player.health > 0) return;
+    if (_isMulti) {
+      player.healFull();
+      _randomSpawnInField();
+      unawaited(network!.setLocalPlayerHp(kDefaultMaxHp));
+      return;
+    }
     _deathBusy = true;
     pauseEngine();
     unawaited(_runDeathFlowAsync());
@@ -898,9 +1143,6 @@ class FieldGame extends FlameGame with KeyboardEvents {
     if (!isLoaded) return;
     if (yes) {
       session.revive.consumeFreeRevive();
-      player.healFull();
-      _randomSpawnInField();
-    } else if (_isMulti) {
       player.healFull();
       _randomSpawnInField();
     } else {
@@ -931,17 +1173,6 @@ class FieldGame extends FlameGame with KeyboardEvents {
     }
     add(player);
     player.position = manWorldPos - _cameraTopLeft();
-    remoteWorldPos.setFrom(manWorldPos + Vector2(80, 0));
-
-    if (_isMulti) {
-      remotePlayer = await MultiplayerGuestCharacter.load(images);
-      remotePlayer!.opacity = 0;
-      remotePlayer!.position = remoteWorldPos - _cameraTopLeft();
-      add(remotePlayer!);
-      remoteHpBar = HpBar()..label = 'REMOTE';
-      remoteHpBar!.position.setValues(-9999, -9999);
-      add(remoteHpBar!);
-    }
 
     hpBar = HpBar();
     add(hpBar);
@@ -955,10 +1186,6 @@ class FieldGame extends FlameGame with KeyboardEvents {
 
     hpBar.followPlayerFeet(player.position, player.size);
     hpBar.setFilled(player.health);
-    if (remotePlayer != null && remoteHpBar != null) {
-      remoteHpBar!.followPlayerFeet(remotePlayer!.position, remotePlayer!.size);
-      remoteHpBar!.setFilled(kDefaultMaxHp);
-    }
     _syncGrassRoom();
   }
 
@@ -976,19 +1203,29 @@ class FieldGame extends FlameGame with KeyboardEvents {
     if (!isLoaded) return;
 
     final bfm = _bossFightMoveFactor;
-    final spdScale = session.stats.effectiveSpeedScale;
     for (final n in _npcs) {
       if (n.isAlive) {
         n.chaseTargetWorld = manWorldPos;
+        n.chaseStandoffCenterDistance =
+            npcChaseStandoffCenterDistance(player.size.x, n.size.x);
       }
       n.worldSpeedFactor = bfm;
-      n.wanderSpeed = kPlayerFieldMoveSpeed * spdScale;
+      // NPC는 플레이어 [PlayerStats] 버프(스피드업 등)와 무관한 기본 필드 속도만 사용.
+      n.wanderSpeed = kPlayerFieldMoveSpeed;
     }
     _tryProgressRoomNpcWaves(dt);
 
     super.update(dt);
 
     session.stats.tickBuffs(dt);
+    if (_isMulti) {
+      final ap = network!.allPlayers.value;
+      final me = ap[network!.localPlayerId];
+      if (me != null) {
+        player.health = me.hp;
+      }
+      unawaited(_syncPvpBossFromWorld());
+    }
     if (_roomTransitionCooldown > 0) {
       _roomTransitionCooldown -= dt;
       if (_roomTransitionCooldown < 0) {
@@ -1001,7 +1238,9 @@ class FieldGame extends FlameGame with KeyboardEvents {
     }
     _boss?.finishAttackIfNeeded();
     player.finishAttackIfNeeded();
-    remotePlayer?.finishAttackIfNeeded();
+    for (final a in _remoteActors.values) {
+      a.finishAttackIfNeeded();
+    }
 
     if (!player.isAttacking) {
       final mult =
@@ -1052,8 +1291,13 @@ class FieldGame extends FlameGame with KeyboardEvents {
     }
     if (_boss != null) {
       final bsf = _bossFightMoveFactor;
-      _boss!.chaseSpeedWorld = kPlayerFieldMoveSpeed * session.stats.effectiveSpeedScale;
-      _boss!.stepMovement(dt, manWorldPos, speedFactor: bsf);
+      _boss!.chaseSpeedWorld =
+          _isMulti ? kPlayerFieldMoveSpeed * 0.9 : kPlayerFieldMoveSpeed;
+      _boss!.chaseStandoffCenterDistance =
+          npcChaseStandoffCenterDistance(player.size.x, _boss!.size.x);
+      if (!_isMulti || _isHost) {
+        _boss!.stepMovement(dt, _bossTargetWorld(), speedFactor: bsf);
+      }
       _boss!.syncScreen(cam);
     }
 
@@ -1066,7 +1310,7 @@ class FieldGame extends FlameGame with KeyboardEvents {
           !npc.isAttacking) {
         if (npc.beginAttackToward(manWorldPos)) {
           npc.nextAttackIn = kNpcAttackCooldownSec;
-          player.takeDamage(npc.meleeDamage.clamp(1, 99));
+          _applyLocalDamage(npc.meleeDamage.clamp(1, 99));
           if (npc.openingAttackIsKick) {
             _knockPlayerFromNpc(npc.worldCenter);
           }
@@ -1082,14 +1326,14 @@ class FieldGame extends FlameGame with KeyboardEvents {
                   .clamp(24.0, kNpcAttackRange) &&
           !_boss!.isAttacking) {
         if (_boss!.beginAttackToward(manWorldPos)) {
-          _bossNextAttackIn = kNpcAttackCooldownSec;
-          player.takeDamage(_boss!.attackDamage.clamp(1, 99));
+          _bossNextAttackIn = _isMulti ? 1.0 : kNpcAttackCooldownSec;
+          _applyLocalDamage(_boss!.attackDamage.clamp(1, 99));
         }
       }
     }
 
     final aliveNpcCount = _npcs.where((n) => n.isAlive).length;
-    if (aliveNpcCount < _prevAliveNpcCount) {
+    if (!_isMulti && aliveNpcCount < _prevAliveNpcCount) {
       _healFullOnWin();
     }
     _prevAliveNpcCount = aliveNpcCount;
@@ -1119,49 +1363,92 @@ class FieldGame extends FlameGame with KeyboardEvents {
     hpBar.followPlayerFeet(player.position, player.size);
     hpBar.setFilled(player.health);
 
-    final remoteState = network?.remotePlayer.value;
-    if (remotePlayer != null && remoteState != null) {
-      final sameRoom =
-          remoteState.roomRx == _roomX && remoteState.roomRy == _roomY;
-      if (sameRoom) {
-        remotePlayer!.opacity = 1;
-        final t = (dt * 8).clamp(0.0, 1.0);
-        remoteWorldPos =
-            remoteWorldPos + (Vector2(remoteState.x, remoteState.y) - remoteWorldPos) * t;
-        remoteWorldPos.x =
-            remoteWorldPos.x.clamp(-_halfBounds.x, _halfBounds.x);
-        remoteWorldPos.y =
-            remoteWorldPos.y.clamp(kPathMinWorldY, kPathMaxWorldY);
-        remoteFacingX = remoteState.facingX;
-        if (_remoteLastAction != remoteState.action ||
-            remoteState.action == AvatarAction.idle ||
-            remoteState.action == AvatarAction.walk) {
-          remotePlayer!.playRemoteAction(
-            remoteState.action,
-            facingX: remoteFacingX,
-            targetWorld: manWorldPos,
-          );
-          _remoteLastAction = remoteState.action;
+    if (_isMulti) {
+      final net = network!;
+      final remotes = net.remotePlayers.value;
+      for (final rid in _remoteActors.keys.toList()) {
+        if (!remotes.containsKey(rid)) {
+          remove(_remoteActors[rid]!);
+          _remoteActors.remove(rid);
+          final bar = _remoteHpBars.remove(rid);
+          if (bar != null) remove(bar);
+          _remoteRenderPos.remove(rid);
+          _remoteActionSeen.remove(rid);
+          _hostBossHitSeenAction.remove(rid);
+          _remotePrevHp.remove(rid);
         }
-        remotePlayer!.position = remoteWorldPos - cam;
-        remoteHpBar?.followPlayerFeet(remotePlayer!.position, remotePlayer!.size);
-        remoteHpBar?.setFilled(remoteState.hp);
-
-        if (remoteState.hp <= 0) {
-          if (!_healedAfterRemoteDown) {
-            _healFullOnWin();
-            _healedAfterRemoteDown = true;
-          }
-        } else {
-          _healedAfterRemoteDown = false;
-        }
-      } else {
-        remotePlayer!.opacity = 0;
-        remoteHpBar?.position.setValues(-9999, -9999);
       }
-    } else if (remotePlayer != null) {
-      remotePlayer!.opacity = 0;
-      remoteHpBar?.position.setValues(-9999, -9999);
+      for (final id in remotes.keys) {
+        if (!_remoteActors.containsKey(id) && !_remoteActorsLoading.contains(id)) {
+          _remoteActorsLoading.add(id);
+          unawaited(_addRemotePlayerCharacter(id));
+        }
+      }
+      for (final e in remotes.entries) {
+        final id = e.key;
+        final st = e.value;
+        final actor = _remoteActors[id];
+        if (actor == null) continue;
+        final bar = _remoteHpBars[id];
+        final prevHp = _remotePrevHp[id];
+        _remotePrevHp[id] = st.hp;
+        if (prevHp != null && prevHp > 0 && st.hp <= 0) {
+          player.healBy(kDefaultMaxHp ~/ 2);
+          unawaited(network!.setLocalPlayerHp(player.health));
+        }
+        final sameRoom = st.roomRx == _roomX && st.roomRy == _roomY;
+        if (!sameRoom) {
+          actor.opacity = 0;
+          bar?.position.setValues(-9999, -9999);
+          continue;
+        }
+        actor.opacity = 1;
+        final targetPos = Vector2(st.x, st.y);
+        var sm = _remoteRenderPos[id] ?? targetPos;
+        final t = (dt * 8).clamp(0.0, 1.0);
+        sm = sm + (targetPos - sm) * t;
+        sm.x = sm.x.clamp(-_halfBounds.x, _halfBounds.x);
+        sm.y = sm.y.clamp(kPathMinWorldY, kPathMaxWorldY);
+        _remoteRenderPos[id] = sm;
+        final face = st.facingX >= 0 ? 1.0 : -1.0;
+        actor.scale = Vector2(face, 1.0);
+        final prevA = _remoteActionSeen[id];
+        if (prevA != st.action ||
+            st.action == AvatarAction.idle ||
+            st.action == AvatarAction.walk) {
+          actor.playRemoteAction(st.action);
+          _remoteActionSeen[id] = st.action;
+        }
+        actor.position = sm - cam;
+        if (bar != null) {
+          final tag = net.playerTags.value[id]?.trim();
+          bar.label = (tag != null && tag.isNotEmpty) ? tag : 'PVP';
+          bar.followPlayerFeet(actor.position, actor.size);
+          bar.setFilled(st.hp);
+        }
+
+        if (_isHost) {
+          final prev = _hostBossHitSeenAction[id];
+          final attacking =
+              st.action == AvatarAction.punch || st.action == AvatarAction.kick;
+          final newlyStarted = attacking && prev != st.action;
+          if (newlyStarted &&
+              st.roomRx == _roomX &&
+              st.roomRy == _roomY &&
+              _boss != null &&
+              _boss!.isAlive) {
+            final reach = st.action == AvatarAction.kick
+                ? kKickReachSpriteWidths
+                : kPunchReachSpriteWidths;
+            const dmg = 1;
+            if (_canHitBossFrom(Vector2(st.x, st.y), st.facingX, reach)) {
+              _boss!.takeDamage(dmg);
+            }
+          }
+          _hostBossHitSeenAction[id] =
+              attacking ? st.action : AvatarAction.idle;
+        }
+      }
     }
 
     for (var i = 0; i < _npcs.length; i++) {
@@ -1176,7 +1463,28 @@ class FieldGame extends FlameGame with KeyboardEvents {
     }
 
     if (_isMulti) {
-      _remoteName = network!.remoteTag.value;
+      final n = network!.allPlayers.value.length;
+      _remoteHudLabel = 'PvP $n/$kPvpMaxRoomPlayers';
+      if (_isHost && _boss != null) {
+        final sharedHp = network!.world.value.boss?.hp ?? _boss!.hp;
+        final alive = sharedHp > 0;
+        unawaited(
+          network!.publishWorld(
+            WorldNetState(
+              floor: session.currentFloor,
+              npcs: const <NpcNetState>[],
+              boss: BossNetState(
+                x: _boss!.worldCenter.x,
+                y: _boss!.worldCenter.y,
+                hp: sharedHp,
+                alive: alive,
+                action: alive ? _boss!.action : AvatarAction.idle,
+              ),
+              victory: false,
+            ),
+          ),
+        );
+      }
       final moving = velocity.length2 > 1;
       final action = player.isAttacking
           ? player.action
@@ -1197,24 +1505,8 @@ class FieldGame extends FlameGame with KeyboardEvents {
           ),
         ),
       );
-      if (_isHost) {
-        final rem = network!.remotePlayer.value?.score ?? 0;
-        unawaited(
-          network!.publishWorld(
-            WorldNetState(
-              floor: session.currentFloor,
-              npcs: const <NpcNetState>[],
-              victory: false,
-              hostScore: _myScore,
-              guestScore: rem,
-              winnerTag: '',
-            ),
-          ),
-        );
-      }
     }
 
-    final oppScore = network?.remotePlayer.value?.score;
     final hudSnap = FieldOverlayHudData(
       floor: session.currentFloor,
       hp: player.health,
@@ -1223,15 +1515,12 @@ class FieldGame extends FlameGame with KeyboardEvents {
           ((_boss?.isAlive ?? false) ? 1 : 0),
       npcTotal: _npcs.length + ((_boss != null) ? 1 : 0),
       roomNumber: DungeonLayout.roomNumber1to9(_roomX, _roomY),
-      remoteShort: _isMulti ? _remoteName : '',
-      hostScore: _isMulti
-          ? (_isHost ? _myScore : (oppScore ?? 0))
-          : null,
-      guestScore: _isMulti
-          ? (_isHost ? (oppScore ?? 0) : _myScore)
-          : null,
+      remoteShort: _isMulti ? _remoteHudLabel : '',
+      hostScore: null,
+      guestScore: null,
       powerBuffSecRemain: session.stats.powerBuffRemainingSecCeil,
       speedBuffSecRemain: session.stats.speedBuffRemainingSecCeil,
+      hideFloorInHud: _isMulti,
     );
     if (overlayHud != null && overlayHud!.value != hudSnap) {
       overlayHud!.value = hudSnap;
@@ -1272,6 +1561,15 @@ class FieldGame extends FlameGame with KeyboardEvents {
   @override
   void onRemove() {
     _bossBannerClearTimer?.cancel();
+    for (final a in _remoteActors.values) {
+      remove(a);
+    }
+    _remoteActors.clear();
+    for (final b in _remoteHpBars.values) {
+      remove(b);
+    }
+    _remoteHpBars.clear();
+    _hostBossHitSeenAction.clear();
     super.onRemove();
   }
 }

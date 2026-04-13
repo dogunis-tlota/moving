@@ -15,6 +15,12 @@ bool _isRoomExpiredMap(Map<String, dynamic> map) {
   return false;
 }
 
+int _playerCountFromRoomMap(Map<String, dynamic> map) {
+  final p = map['players'];
+  if (p is! Map) return 0;
+  return p.length;
+}
+
 class RealtimeRoomService {
   RealtimeRoomService({FirebaseDatabase? database}) : _db = database;
 
@@ -47,12 +53,10 @@ class RealtimeRoomService {
     await _userActiveRoomRef(hostPlayerId).remove();
   }
 
-  /// 로컬 복구 후 RTDB `userActiveRooms`를 다시 맞춤.
   Future<void> putHostPendingRoomCode(String hostPlayerId, String roomCode) async {
     await _saveHostPendingRoomCode(hostPlayerId, roomCode);
   }
 
-  /// 호스트가 만든 방 코드(새로고침 복구용). 방이 없거나 종료되었으면 null.
   Future<String?> fetchPendingRoomCodeForHost(String hostPlayerId) async {
     final snap = await _userActiveRoomRef(hostPlayerId).get();
     final raw = snap.value;
@@ -97,34 +101,36 @@ class RealtimeRoomService {
     await roomRef(roomCode).set(<String, dynamic>{
       'createdAtMs': now,
       'expiresAtMs': now + kRoomLifetimeMs,
-      'phase': 'waiting',
+      'phase': 'playing',
       'hostPlayerId': hostPlayerId,
-      'guestPlayerId': '',
-      'hostTag': hostTag,
-      'guestTag': '',
       'players': <String, dynamic>{
         hostPlayerId: PlayerNetState(
           x: 0,
           y: 0,
           facingX: 1,
-          hp: 10,
+          hp: kDefaultMaxHp,
           action: AvatarAction.idle,
           updatedAtMs: now,
           score: 0,
           floor: 1,
+          roomRx: 1,
+          roomRy: 1,
         ).toMap(),
+      },
+      'playerTags': <String, dynamic>{
+        hostPlayerId: hostTag,
       },
       'world': WorldNetState.initial().toMap(),
     });
     await _saveHostPendingRoomCode(hostPlayerId, roomCode);
     await playerRef(roomCode, hostPlayerId).onDisconnect().remove();
-    await roomRef(roomCode).child('guestPlayerId').onDisconnect().remove();
+    await roomRef(roomCode).child('playerTags/$hostPlayerId').onDisconnect().remove();
   }
 
   Future<bool> joinRoom({
     required String roomCode,
-    required String guestPlayerId,
-    required String guestTag,
+    required String playerId,
+    required String playerTag,
   }) async {
     final room = roomRef(roomCode);
     final snapshot = await room.get();
@@ -135,30 +141,39 @@ class RealtimeRoomService {
       unawaited(room.remove());
       return false;
     }
-    final guest = (map['guestPlayerId'] ?? '').toString();
-    if (guest.isNotEmpty) return false;
+    final phase = (map['phase'] ?? '').toString();
+    if (phase == 'finished') return false;
 
-    await room.update(<String, dynamic>{
-      'guestPlayerId': guestPlayerId,
-      'guestTag': guestTag,
-      'phase': 'playing',
-    });
+    final n = _playerCountFromRoomMap(map);
+    if (n >= kPvpMaxRoomPlayers) return false;
+
+    final players = map['players'];
+    if (players is Map && players.containsKey(playerId)) {
+      return false;
+    }
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    await playerRef(roomCode, guestPlayerId).set(
+    await playerRef(roomCode, playerId).set(
       PlayerNetState(
         x: 0,
         y: 0,
         facingX: 1,
-        hp: 10,
+        hp: kDefaultMaxHp,
         action: AvatarAction.idle,
         updatedAtMs: now,
         score: 0,
         floor: 1,
+        roomRx: 1,
+        roomRy: 1,
       ).toMap(),
     );
-    await playerRef(roomCode, guestPlayerId).onDisconnect().remove();
-    await roomRef(roomCode).child('guestPlayerId').onDisconnect().remove();
+    await room.child('playerTags/$playerId').set(playerTag);
+    await room.update(<String, dynamic>{
+      'phase': 'playing',
+    });
+
+    await playerRef(roomCode, playerId).onDisconnect().remove();
+    await room.child('playerTags/$playerId').onDisconnect().remove();
     return true;
   }
 
@@ -172,23 +187,27 @@ class RealtimeRoomService {
       await roomRef(roomCode).remove();
       return;
     }
-    // 게스트: 방 전체 삭제 시도(호스트와 동일하게 세션 종료). 규칙상 실패 시 대기 상태로만 복구.
-    try {
-      await roomRef(roomCode).remove();
-    } catch (_) {
-      await playerRef(roomCode, playerId).remove();
-      await roomRef(roomCode).child('guestPlayerId').set('');
-      await roomRef(roomCode).child('guestTag').set('');
-      await roomRef(roomCode).child('phase').set('waiting');
-    }
+    await playerRef(roomCode, playerId).remove();
+    await roomRef(roomCode).child('playerTags/$playerId').remove();
   }
 
+  /// 위치·액션만 갱신. [hp]는 [damagePlayer]로만 변경(클라가 set으로 덮어쓰지 않음).
   Future<void> updatePlayerState({
     required String roomCode,
     required String playerId,
     required PlayerNetState state,
   }) async {
-    await playerRef(roomCode, playerId).set(state.toMap());
+    await playerRef(roomCode, playerId).update(<String, dynamic>{
+      'x': state.x,
+      'y': state.y,
+      'facingX': state.facingX,
+      'action': actionToString(state.action),
+      'updatedAtMs': state.updatedAtMs,
+      'score': state.score,
+      'floor': state.floor,
+      'roomRx': state.roomRx,
+      'roomRy': state.roomRy,
+    });
   }
 
   Future<void> updateWorldState({
@@ -203,8 +222,8 @@ class RealtimeRoomService {
         await _database
             .ref('rooms')
             .orderByChild('phase')
-            .equalTo('waiting')
-            .limitToFirst(1)
+            .equalTo('playing')
+            .limitToFirst(24)
             .get();
     final raw = snap.value;
     if (raw is! Map) return null;
@@ -218,12 +237,13 @@ class RealtimeRoomService {
         unawaited(roomRef(code).remove());
         continue;
       }
-      return code;
+      if (_playerCountFromRoomMap(rm) < kPvpMaxRoomPlayers) {
+        return code;
+      }
     }
     return null;
   }
 
-  /// DB `rooms` 아래 방 키 목록(정렬, 최대 [limit]개).
   Future<List<String>> listRoomCodesInDatabase({int limit = 80}) async {
     try {
       final snap =
@@ -249,13 +269,12 @@ class RealtimeRoomService {
     }
   }
 
-  /// `phase == waiting` 이고 게스트가 비어 있는 방 코드 목록.
   Future<List<String>> listJoinableRoomCodes({int limit = 48}) async {
     try {
       final snap = await _database
           .ref('rooms')
           .orderByChild('phase')
-          .equalTo('waiting')
+          .equalTo('playing')
           .limitToFirst(limit)
           .get();
       final raw = snap.value;
@@ -269,8 +288,9 @@ class RealtimeRoomService {
             unawaited(roomRef(code).remove());
             return;
           }
-          final g = (m['guestPlayerId'] ?? '').toString();
-          if (g.isEmpty) out.add(code);
+          if (_playerCountFromRoomMap(m) < kPvpMaxRoomPlayers) {
+            out.add(code);
+          }
         }
       });
       out.sort();
@@ -296,6 +316,42 @@ class RealtimeRoomService {
     await node.update(<String, dynamic>{
       'hp': next,
       'updatedAtMs': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> setPlayerHp({
+    required String roomCode,
+    required String playerId,
+    required int hp,
+  }) async {
+    await playerRef(roomCode, playerId).update(<String, dynamic>{
+      'hp': hp.clamp(0, 999),
+      'updatedAtMs': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> damageBoss({
+    required String roomCode,
+    required int amount,
+  }) async {
+    if (amount <= 0) return;
+    final node = worldRef(roomCode);
+    final snap = await node.get();
+    final raw = snap.value;
+    if (raw is! Map) return;
+    final map = raw.map((k, v) => MapEntry(k.toString(), v));
+    final bossRaw = map['boss'];
+    if (bossRaw is! Map) return;
+    final boss = bossRaw.map((k, v) => MapEntry(k.toString(), v));
+    final alive = boss['alive'] == true;
+    if (!alive) return;
+    final hp = (boss['hp'] as num?)?.toInt() ?? 0;
+    final next = (hp - amount).clamp(0, 999);
+    final nextAlive = next > 0;
+    await node.update(<String, dynamic>{
+      'boss/hp': next,
+      'boss/alive': nextAlive,
+      if (!nextAlive) 'boss/action': actionToString(AvatarAction.idle),
     });
   }
 

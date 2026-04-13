@@ -1,5 +1,4 @@
 import 'dart:math';
-import 'dart:ui';
 
 import 'package:flame/cache.dart';
 import 'package:flame/components.dart';
@@ -40,6 +39,9 @@ class NpcCharacter extends SpriteAnimationComponent {
   /// [FieldGame]이 매 프레임 플레이어 위치를 넣어 줌(추적·보통 성향).
   Vector2? chaseTargetWorld;
 
+  /// 추적 시 플레이어 중심과 이 거리(이하)까지는 더 이상 접근하지 않음([npcChaseStandoffCenterDistance]).
+  double chaseStandoffCenterDistance = 24;
+
   static const double _minDirectionSeconds = 0.7;
   static const double _maxDirectionSeconds = 2.2;
 
@@ -52,7 +54,6 @@ class NpcCharacter extends SpriteAnimationComponent {
   bool isNetworkDriven = false;
   /// [FieldGame]에서 보스전 등(0.5) 일 때 이동 속도 배율.
   double worldSpeedFactor = 1.0;
-  Color tintColor = const Color(0xFF7EB6FF);
   final Vector2 _dir = Vector2(1, 0);
   double _directionTimeLeft = 0;
 
@@ -182,10 +183,10 @@ class NpcCharacter extends SpriteAnimationComponent {
       return SpriteAnimation.fromFrameData(image, data);
     }
 
-    final walk = await strip(kManSpriteAsset, kManWalkStepTime);
+    final walk = await strip(kNpcWalkSpriteAsset, kManWalkStepTime);
     final punch =
-        await strip(kManPunchAsset, kPunchAnimStepTime, loop: false);
-    final kick = await strip(kManKickAsset, kKickAnimStepTime, loop: false);
+        await strip(kNpcPunchSpriteAsset, kPunchAnimStepTime, loop: false);
+    final kick = await strip(kNpcKickSpriteAsset, kKickAnimStepTime, loop: false);
 
     final frameSize = Vector2(
       walk.frames.first.sprite.srcSize.x,
@@ -198,7 +199,6 @@ class NpcCharacter extends SpriteAnimationComponent {
       kick: kick,
       size: frameSize,
     );
-    npc.paint.colorFilter = ColorFilter.mode(npc.tintColor, BlendMode.srcATop);
     return npc;
   }
 
@@ -258,17 +258,12 @@ class NpcCharacter extends SpriteAnimationComponent {
     if (stunSecRemaining > 0) {
       stunSecRemaining = (stunSecRemaining - dt).clamp(0.0, 999.0);
       if (stunSecRemaining > 0) {
-        paint.colorFilter = const ColorFilter.mode(
-          Color(0xFF000000),
-          BlendMode.srcATop,
-        );
         _attacking = false;
         animation = _walkAnim;
         animationTicker?.currentIndex = 0;
         playing = false;
         return;
       }
-      paint.colorFilter = ColorFilter.mode(tintColor, BlendMode.srcATop);
     }
 
     if (_attacking) return;
@@ -303,7 +298,7 @@ class NpcCharacter extends SpriteAnimationComponent {
         final target = chaseTargetWorld;
         if (target != null) {
           final to = target - worldCenter;
-          if (to.length2 > 2) {
+          if (to.length > chaseStandoffCenterDistance) {
             final dir = to.normalized();
             final move = dir * wanderSpeed * worldSpeedFactor * dt;
             tryMoveWithWorldWalls(worldCenter, move.x, move.y, hw, hh);
@@ -328,7 +323,7 @@ class NpcCharacter extends SpriteAnimationComponent {
         }
         if (_normalApproaching && targetN != null) {
           final to = targetN - worldCenter;
-          if (to.length2 > 3) {
+          if (to.length > chaseStandoffCenterDistance) {
             final dir = to.normalized();
             final move = dir * wanderSpeed * worldSpeedFactor * dt;
             tryMoveWithWorldWalls(worldCenter, move.x, move.y, hw, hh);

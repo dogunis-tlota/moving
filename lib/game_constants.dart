@@ -1,5 +1,6 @@
-/// 플레이어·NPC가 같은 `man.png` 스프라이트 시트를 쓸 때 공유하는 값.
-/// (600×100, 6프레임 등 — 에셋 바꾸면 여기만 맞추면 됨)
+import 'dart:math' show max, min;
+
+/// 걷기 스트립 공통: 가로 [kManWalkFrameCount]프레임(플레이어 `man.png`, NPC `man2.png` 등).
 const int kManWalkFrameCount = 6;
 const double kManWalkStepTime = 0.12;
 const String kManSpriteAsset = 'man.png';
@@ -7,6 +8,11 @@ const double kCharacterScale = 0.56;
 
 const String kManPunchAsset = 'man_punch.png';
 const String kManKickAsset = 'man_kick.png';
+
+/// 필드 NPC 스프라이트(플레이어 `man*.png`와 별도).
+const String kNpcWalkSpriteAsset = 'man2.png';
+const String kNpcPunchSpriteAsset = 'man2_p.png';
+const String kNpcKickSpriteAsset = 'man2_k.png';
 
 /// 펀치·킥 스프라이트 한 프레임당 표시 시간(초). **값이 작을수록 빠름.**
 const double kPunchAnimStepTime = 0.05;
@@ -22,6 +28,14 @@ const int kDefaultMaxHp = 10;
 /// RTDB 멀티 방 유지 시간(밀리초). 이후 입장 불가·목록에서 정리.
 const int kRoomLifetimeMs = 5 * 60 * 1000;
 
+/// PvP 방 최대 인원(호스트 포함).
+const int kPvpMaxRoomPlayers = 6;
+
+/// 멀티 PvP 전용 보스 스프라이트(6프레임 가로 스트립).
+const String kPvpBoss1WalkAsset = 'boss1.png';
+const String kPvpBoss1PunchAsset = 'boss1_p.png';
+const String kPvpBoss1KickAsset = 'boss1_k.png';
+
 /// 필드 파워업·스피드업 지속 시간(초).
 const double kPickupBuffDurationSec = 30;
 
@@ -31,8 +45,9 @@ const double kPickupPickupRadius = 40;
 /// 층이 오를수록 NPC 최대 체력 증가량(기본 [kDefaultMaxHp]에 가산).
 const int kNpcBonusHpPerFloor = 2;
 
-/// 필드 이동 최대 속도(월드 픽셀/초). 키보드·터치 정규화 후 이 값을 곱함. NPC·보스도 동일 기준에 [PlayerStats.effectiveSpeedScale]을 곱해 맞춤.
-const double kPlayerFieldMoveSpeed = 200.0;
+/// 플레이어 기준 필드 최대 속도(월드 픽셀/초). 조작 입력 정규화 후 이 값에 [PlayerStats.effectiveSpeedScale]을 곱함.
+/// NPC·보스는 버프 없이 이 값만 쓴 뒤 보스전 등은 별도 배율([kBossFightMoveSpeedFactor] 등)만 적용.
+const double kPlayerFieldMoveSpeed = 140.0;
 
 int npcMaxHpForFloor(int floor) {
   final f = floor.clamp(1, kMaxFloor);
@@ -76,6 +91,16 @@ const double kNpcRoomFirstSpawnDelaySec = 3.0;
 /// 적이 플레이어에게 피해를 주는 거리(가까이 붙어야 맞도록 축소).
 const double kNpcAttackRange = 62;
 const double kNpcAttackCooldownSec = 1.15;
+
+/// 플레이어·NPC(또는 보스) 중심 간 거리가 이 값 이하이면 추적 전진을 멈춤.
+/// 스프라이트가 겹치지 않으면서 [kNpcAttackRange] 판정 안쪽에 머물도록 맞춤.
+double npcChaseStandoffCenterDistance(double playerWidth, double npcWidth) {
+  final attackThresh =
+      ((playerWidth + npcWidth) * 0.40).clamp(24.0, kNpcAttackRange);
+  final noOverlapBody = (playerWidth + npcWidth) * 0.36;
+  final cap = (attackThresh - 1.0).clamp(18.0, kNpcAttackRange);
+  return min(cap, max(noOverlapBody, 22.0));
+}
 
 /// 보스 최대 체력 배수·플레이어에게 입히는 피해량 배수 (기본 1 대비).
 const double kBossHpMultiplier = 2;

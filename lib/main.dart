@@ -15,7 +15,6 @@ import 'revive_dialog.dart';
 import 'splash_screen.dart';
 import 'victory_dialog.dart';
 import 'multiplayer/network_session.dart';
-import 'multiplayer/room_models.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -63,13 +62,9 @@ class _GameHostState extends State<GameHost> {
   late final ValueNotifier<FieldOverlayHudData> _overlayHud;
   late final ValueNotifier<String?> _bossBanner;
   late FieldGame _field;
-  bool _joinToastShown = false;
   Timer? _runTimer;
   int _runSeconds = 0;
-  /// 멀티: 상대 층 상승 알림용.
-  int? _prevRemoteFloor;
-  String? _remoteNpcCatchBanner;
-  Timer? _remoteNpcCatchBannerTimer;
+  int _prevRemotePlayerCount = 0;
 
   @override
   void initState() {
@@ -97,19 +92,42 @@ class _GameHostState extends State<GameHost> {
       onSinglePlayerRunEnded:
           widget.network == null ? _onSinglePlayerGameOver : null,
     );
-    widget.network?.remotePlayer.addListener(_onRemotePlayerChanged);
+    widget.network?.allPlayers.addListener(_onRemotePlayerChanged);
     _runTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _runSeconds++);
     });
+    if (widget.network != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        showDialog<void>(
+          context: context,
+          barrierDismissible: true,
+          builder: (ctx) => AlertDialog(
+            title: const Text('멀티플레이 PvP'),
+            content: const Text(
+              'PvP 모드에 입장했습니다.\n\n'
+              '· 보스 몬스터만 등장합니다 (boss1).\n'
+              '· 보스를 처치하면 파워업·이동속도 아이템이 나타납니다.\n'
+              '· 상대를 격파하면 체력이 일부 회복됩니다.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('확인'),
+              ),
+            ],
+          ),
+        );
+      });
+    }
   }
 
   @override
   void dispose() {
     _runTimer?.cancel();
-    _remoteNpcCatchBannerTimer?.cancel();
     _overlayHud.dispose();
     _bossBanner.dispose();
-    widget.network?.remotePlayer.removeListener(_onRemotePlayerChanged);
+    widget.network?.allPlayers.removeListener(_onRemotePlayerChanged);
     final net = widget.network;
     if (net != null) {
       unawaited(net.leave());
@@ -152,54 +170,20 @@ class _GameHostState extends State<GameHost> {
   void _onRemotePlayerChanged() {
     if (!mounted) return;
     final net = widget.network;
-    final remote = net?.remotePlayer.value;
-    if (remote == null) {
-      _prevRemoteFloor = null;
-      return;
-    }
-    if (!_joinToastShown) {
-      _joinToastShown = true;
+    if (net == null) return;
+    final n = net.allPlayers.value.length;
+    final others = n > 1 ? n - 1 : 0;
+    if (others > _prevRemotePlayerCount && others >= 1) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('다른 플레이어가 입장했습니다.')),
+        SnackBar(content: Text('플레이어 입장 (상대 $others명)')),
       );
     }
-    _onRemoteOpponentScore(remote, net!);
-  }
-
-  void _onRemoteOpponentScore(PlayerNetState remote, NetworkSession net) {
-    final floor = remote.floor;
-    final tag = net.remoteTag.value.trim();
-    final name = tag.isEmpty ? '상대' : tag;
-
-    final prevF = _prevRemoteFloor;
-    if (prevF != null && floor > prevF) {
-      _showRemoteNpcCatchBanner('$name가 npc를 잡고 $floor층으로 올라갔습니다.');
-    }
-    _prevRemoteFloor = floor;
-  }
-
-  void _showRemoteNpcCatchBanner(String text) {
-    if (!mounted) return;
-    _remoteNpcCatchBannerTimer?.cancel();
-    setState(() => _remoteNpcCatchBanner = text);
-    _remoteNpcCatchBannerTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) {
-        setState(() => _remoteNpcCatchBanner = null);
-      }
-    });
+    _prevRemotePlayerCount = others;
   }
 
   Future<void> _onVictory() async {
     if (!mounted) return;
-    final world = widget.network?.world.value;
-    if (world != null) {
-      final winner = world.winnerTag.isEmpty ? '승자 없음' : world.winnerTag;
-      final msg =
-          '최종 결과\n'
-          'HOST: ${world.hostScore}점\n'
-          'GUEST: ${world.guestScore}점\n'
-          '우승: $winner';
-      await showVictoryDialog(context, message: msg);
+    if (widget.network != null) {
       return;
     }
     await showVictoryDialog(context);
@@ -337,53 +321,6 @@ class _GameHostState extends State<GameHost> {
                 );
               },
             ),
-            if (widget.network != null && _remoteNpcCatchBanner != null)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: SafeArea(
-                  bottom: false,
-                  child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: Container(
-                          width: double.infinity,
-                          constraints: const BoxConstraints(maxWidth: 560),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.78),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.white24),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.45),
-                                blurRadius: 12,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
-                          child: Text(
-                            _remoteNpcCatchBanner!,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              height: 1.25,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
             Positioned(
               top: 4,
               left: 4,
@@ -418,7 +355,7 @@ class _GameHostState extends State<GameHost> {
               child: ValueListenableBuilder<FieldOverlayHudData>(
                 valueListenable: _overlayHud,
                 builder: (context, h, _) {
-                  final multi = h.hostScore != null && h.guestScore != null;
+                  final multi = h.remoteShort.isNotEmpty;
                   final buff = <String>[
                     if (h.powerBuffSecRemain > 0)
                       'PWR×2 ${h.powerBuffSecRemain}s',
@@ -426,11 +363,11 @@ class _GameHostState extends State<GameHost> {
                       'SPD×2 ${h.speedBuffSecRemain}s',
                   ].join(' ');
                   final base = multi
-                      ? '방${h.roomNumber} · F${h.floor} HP${h.hp}/${h.hpMax} N${h.npcAlive}/${h.npcTotal} H:${h.hostScore} G:${h.guestScore}'
+                      ? (h.hideFloorInHud
+                          ? '방${h.roomNumber} · HP${h.hp}/${h.hpMax} · ${h.remoteShort}'
+                          : '방${h.roomNumber} · F${h.floor} HP${h.hp}/${h.hpMax} · ${h.remoteShort}')
                       : '방${h.roomNumber} · F${h.floor} HP${h.hp}/${h.hpMax} N${h.npcAlive}/${h.npcTotal}';
                   final mid = buff.isEmpty ? '' : ' · $buff';
-                  final tail =
-                      h.remoteShort.isNotEmpty ? ' · ${h.remoteShort}' : '';
                   return Material(
                     color: Colors.transparent,
                     child: Container(
@@ -442,7 +379,7 @@ class _GameHostState extends State<GameHost> {
                         border: Border.all(color: Colors.white12),
                       ),
                       child: Text(
-                        '$base$mid$tail',
+                        '$base$mid',
                         textAlign: TextAlign.right,
                         style: const TextStyle(
                           color: Colors.white70,

@@ -21,11 +21,20 @@ class NetworkSession {
   String roomCode = '';
   String localPlayerId = '';
   String localTag = '';
-  String? remotePlayerId;
   bool isHost = false;
 
-  final ValueNotifier<PlayerNetState?> remotePlayer = ValueNotifier(null);
-  final ValueNotifier<String> remoteTag = ValueNotifier('');
+  /// 방에 있는 모든 플레이어(로컬 포함).
+  final ValueNotifier<Map<String, PlayerNetState>> allPlayers =
+      ValueNotifier<Map<String, PlayerNetState>>({});
+
+  /// 로컬을 제외한 상대 목록.
+  final ValueNotifier<Map<String, PlayerNetState>> remotePlayers =
+      ValueNotifier<Map<String, PlayerNetState>>({});
+
+  /// `playerId` → 표시 태그.
+  final ValueNotifier<Map<String, String>> playerTags =
+      ValueNotifier<Map<String, String>>({});
+
   final ValueNotifier<WorldNetState> world = ValueNotifier(WorldNetState.initial());
   final ValueNotifier<bool> victory = ValueNotifier(false);
   final ValueNotifier<String?> error = ValueNotifier(null);
@@ -43,19 +52,16 @@ class NetworkSession {
     return List.generate(6, (_) => chars[rng.nextInt(chars.length)]).join();
   }
 
-  /// 입장 가능한 방 코드 목록 (대기 중·게스트 없음).
   static Future<List<String>> listOpenRoomCodes() async {
     await ensureFirebaseInitialized();
     return RealtimeRoomService().listJoinableRoomCodes();
   }
 
-  /// RTDB `rooms`에 존재하는 방 코드 전체(스냅샷, 최대 [limit]개).
   static Future<List<String>> listRoomCodesFromDatabase({int limit = 80}) async {
     await ensureFirebaseInitialized();
     return RealtimeRoomService().listRoomCodesInDatabase(limit: limit);
   }
 
-  /// 새로고침 후 호스트가 이전에 만든 방 코드 복구 (RTDB `userActiveRooms`만 사용).
   static Future<String?> tryRestoreHostRoomCode() async {
     await ensureFirebaseInitialized();
     final auth = FirebaseAuthService();
@@ -63,7 +69,6 @@ class NetworkSession {
     return RealtimeRoomService().fetchPendingRoomCodeForHost(user.uid);
   }
 
-  /// 이미 존재하는 방에 호스트로 다시 연결 (방 코드 표시·스트림 복구).
   Future<bool> attachAsHost({
     required String roomCode,
     required String playerTag,
@@ -132,12 +137,12 @@ class NetworkSession {
     final user = await _authService.ensureSignedInAnonymously();
     final playerId = user.uid;
     final ok = await _service.joinRoom(
-      roomCode: code,
-      guestPlayerId: playerId,
-      guestTag: playerTag,
+      roomCode: code.toUpperCase().trim(),
+      playerId: playerId,
+      playerTag: playerTag,
     );
     if (!ok) return false;
-    roomCode = code;
+    roomCode = code.toUpperCase().trim();
     localPlayerId = playerId;
     localTag = playerTag;
     isHost = false;
@@ -163,21 +168,31 @@ class NetworkSession {
     }
   }
 
+  void _applyPlayerTagsFromMeta(Map<String, dynamic> meta) {
+    final raw = meta['playerTags'];
+    final out = <String, String>{};
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        out[k.toString()] = v.toString();
+      });
+    }
+    playerTags.value = out;
+  }
+
   void _bindStreams() {
     _playersSub?.cancel();
     _worldSub?.cancel();
     _metaSub?.cancel();
 
     _playersSub = _service.watchPlayers(roomCode).listen((players) {
-      String? remoteId;
-      for (final id in players.keys) {
-        if (id != localPlayerId) {
-          remoteId = id;
-          break;
+      allPlayers.value = players;
+      final remotes = <String, PlayerNetState>{};
+      for (final e in players.entries) {
+        if (e.key != localPlayerId) {
+          remotes[e.key] = e.value;
         }
       }
-      remotePlayerId = remoteId;
-      remotePlayer.value = remoteId != null ? players[remoteId] : null;
+      remotePlayers.value = remotes;
     });
 
     _worldSub = _service.watchWorld(roomCode).listen((state) {
@@ -186,12 +201,8 @@ class NetworkSession {
     });
 
     _metaSub = _service.watchRoomMeta(roomCode).listen((meta) {
+      _applyPlayerTagsFromMeta(meta);
       final phase = (meta['phase'] ?? '').toString();
-      if (isHost) {
-        remoteTag.value = (meta['guestTag'] ?? '').toString();
-      } else {
-        remoteTag.value = (meta['hostTag'] ?? '').toString();
-      }
       if (phase == 'finished') {
         victory.value = true;
       }
@@ -219,7 +230,6 @@ class NetworkSession {
     await _service.updateWorldState(roomCode: roomCode, state: state);
   }
 
-  /// 10층 클리어 등 매치 종료. 호스트·게스트 모두 호출 가능.
   Future<void> finishMatch({
     required int hostScore,
     required int guestScore,
@@ -241,14 +251,27 @@ class NetworkSession {
     );
   }
 
-  Future<void> damageRemote(int amount) async {
-    final remoteId = remotePlayerId;
-    if (remoteId == null || roomCode.isEmpty) return;
+  Future<void> damagePlayer(String targetPlayerId, int amount) async {
+    if (roomCode.isEmpty || amount <= 0) return;
     await _service.damagePlayer(
       roomCode: roomCode,
-      playerId: remoteId,
+      playerId: targetPlayerId,
       amount: amount,
     );
+  }
+
+  Future<void> setLocalPlayerHp(int hp) async {
+    if (roomCode.isEmpty || localPlayerId.isEmpty) return;
+    await _service.setPlayerHp(
+      roomCode: roomCode,
+      playerId: localPlayerId,
+      hp: hp,
+    );
+  }
+
+  Future<void> damageBoss(int amount) async {
+    if (roomCode.isEmpty || amount <= 0) return;
+    await _service.damageBoss(roomCode: roomCode, amount: amount);
   }
 
   Future<void> dispose() async {
@@ -265,10 +288,10 @@ class NetworkSession {
     roomCode = '';
     localPlayerId = '';
     localTag = '';
-    remotePlayerId = null;
     isHost = false;
-    remotePlayer.value = null;
-    remoteTag.value = '';
+    allPlayers.value = {};
+    remotePlayers.value = {};
+    playerTags.value = {};
     world.value = WorldNetState.initial();
     victory.value = false;
     _lastPublishPlayerMs = 0;

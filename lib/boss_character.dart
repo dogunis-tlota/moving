@@ -65,7 +65,13 @@ class BossCharacter extends SpriteAnimationComponent {
   /// 필드에서 플레이어와 동일한 기준 속도로 맞춤(매 프레임 갱신).
   double chaseSpeedWorld = kPlayerFieldMoveSpeed;
 
+  /// 0보다 크면 플레이어와의 중심 거리가 이 값 이하일 때 추적 이동을 하지 않음.
+  double chaseStandoffCenterDistance = 0;
+
   static const Color _bodyTint = Color(0xFFE53935);
+
+  /// null이면 스프라이트 원색(멀티 PvP 보스 등).
+  ColorFilter? _healthyTint;
 
   void addStun(double seconds) {
     if (!isAlive || seconds <= 0) return;
@@ -129,10 +135,11 @@ class BossCharacter extends SpriteAnimationComponent {
       kick: kick,
       size: Vector2(baseW * scale, baseH * scale),
     );
-    b.paint.colorFilter = const ColorFilter.mode(
-      Color(0xFFE53935),
+    b._healthyTint = ColorFilter.mode(
+      _bodyTint,
       BlendMode.srcATop,
     );
+    b.paint.colorFilter = b._healthyTint;
     b.playing = true;
     return b;
   }
@@ -177,10 +184,62 @@ class BossCharacter extends SpriteAnimationComponent {
       size: sz,
     );
     b.fieldAggressiveChase = true;
-    b.paint.colorFilter = const ColorFilter.mode(
-      Color(0xFFE53935),
+    b._healthyTint = ColorFilter.mode(
+      _bodyTint,
       BlendMode.srcATop,
     );
+    b.paint.colorFilter = b._healthyTint;
+    b.playing = true;
+    return b;
+  }
+
+  /// 멀티 PvP: `boss1` 시트, 색상 필터 없음.
+  static Future<BossCharacter> loadForPvp(
+    Images images,
+    Vector2 playerDisplaySize,
+  ) async {
+    Future<SpriteAnimation> strip(
+      String asset,
+      double stepTime, {
+      bool loop = true,
+    }) async {
+      final image = await images.load(asset);
+      assert(
+        image.width % kManWalkFrameCount == 0,
+        '$asset width must divide by $kManWalkFrameCount.',
+      );
+      final frameW = image.width / kManWalkFrameCount;
+      final frameH = image.height.toDouble();
+      final data = SpriteAnimationData.sequenced(
+        amount: kManWalkFrameCount,
+        stepTime: stepTime,
+        textureSize: Vector2(frameW.toDouble(), frameH),
+        amountPerRow: kManWalkFrameCount,
+        loop: loop,
+      );
+      return SpriteAnimation.fromFrameData(image, data);
+    }
+
+    final walk = await strip(kPvpBoss1WalkAsset, kManWalkStepTime * 0.85);
+    final punch =
+        await strip(kPvpBoss1PunchAsset, kPunchAnimStepTime, loop: false);
+    final kick =
+        await strip(kPvpBoss1KickAsset, kKickAnimStepTime, loop: false);
+
+    final sz = Vector2(
+      playerDisplaySize.x * kBossFieldSizeVsPlayer,
+      playerDisplaySize.y * kBossFieldSizeVsPlayer,
+    );
+
+    final b = BossCharacter._(
+      walk: walk,
+      punch: punch,
+      kick: kick,
+      size: sz,
+    );
+    b.fieldAggressiveChase = true;
+    b._healthyTint = null;
+    b.paint.colorFilter = null;
     b.playing = true;
     return b;
   }
@@ -222,7 +281,7 @@ class BossCharacter extends SpriteAnimationComponent {
         playing = false;
         return;
       }
-      paint.colorFilter = const ColorFilter.mode(_bodyTint, BlendMode.srcATop);
+      paint.colorFilter = _healthyTint;
     }
 
     if (_attacking) return;
@@ -242,7 +301,12 @@ class BossCharacter extends SpriteAnimationComponent {
           _minDirSec + _rng.nextDouble() * (_maxDirSec - _minDirSec);
     }
 
-    worldCenter.add(_moveDir * chaseSpeedWorld * speedFactor * dt);
+    final step = _moveDir * chaseSpeedWorld * speedFactor * dt;
+    final dist = worldCenter.distanceTo(playerWorld);
+    if (chaseStandoffCenterDistance <= 0 ||
+        dist > chaseStandoffCenterDistance) {
+      worldCenter.add(step);
+    }
     final hb = worldHalfBounds;
     if (hb != null) {
       worldCenter.x = worldCenter.x.clamp(-hb.x, hb.x);

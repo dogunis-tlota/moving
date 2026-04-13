@@ -243,4 +243,9 @@ class PlayerCharacter extends SpriteAnimationComponent {
   void healFull() {
     health = kDefaultMaxHp;
   }
+
+  void healBy(int amount) {
+    if (amount <= 0) return;
+    health = (health + amount).clamp(0, kDefaultMaxHp);
+  }
 }

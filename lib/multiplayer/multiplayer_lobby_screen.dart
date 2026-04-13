@@ -108,6 +108,13 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen> {
         _createdCode = net.roomCode;
         _createdNet = net;
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('방이 생성되었습니다. 코드를 상대에게 알려주세요.'),
+          ),
+        );
+      }
       await _refreshRooms();
     } catch (e) {
       if (mounted) {
@@ -147,6 +154,11 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen> {
         return;
       }
       if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('방에 입장했습니다. PvP 필드로 이동합니다.'),
+        ),
+      );
       _pushedGameWithNet = true;
       Navigator.pop(context, net);
     } catch (e) {

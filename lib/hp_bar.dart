@@ -29,6 +29,14 @@ class HpBar extends PositionComponent {
 
   void setFilled(int value) {
     filled = value.clamp(0, segmentCount);
+    final ratio = segmentCount <= 0 ? 0.0 : filled / segmentCount;
+    if (ratio > 0.6) {
+      _fill.color = const Color(0xFF20D65A); // green
+    } else if (ratio > 0.3) {
+      _fill.color = const Color(0xFFF2C94C); // yellow
+    } else {
+      _fill.color = const Color(0xFFE14B4B); // red
+    }
   }
 
   /// 플레이어 `Anchor.center` 기준 화면 위치·크기.
