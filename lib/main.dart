@@ -1,5 +1,5 @@
 import 'package:flame/game.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -392,6 +392,41 @@ class _GameHostState extends State<GameHost> {
                 },
               ),
             ),
+            if (kDebugMode && widget.network != null)
+              Positioned(
+                top: 36,
+                right: 6,
+                child: ValueListenableBuilder<String>(
+                  valueListenable: widget.network!.debugTxSummary,
+                  builder: (context, txt, _) {
+                    if (txt.isEmpty) return const SizedBox.shrink();
+                    return Material(
+                      color: Colors.transparent,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.42),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.white12),
+                        ),
+                        child: Text(
+                          txt,
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(
+                            color: Colors.lightGreenAccent,
+                            fontSize: 11,
+                            height: 1.2,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
           ],
         ),
       ),

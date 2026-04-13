@@ -377,13 +377,23 @@ class RealtimeRoomService {
     });
   }
 
-  Stream<Map<String, dynamic>> watchRoomMeta(String roomCode) {
-    return roomRef(roomCode).onValue.map((event) {
+  Stream<String> watchRoomPhase(String roomCode) {
+    return roomRef(roomCode).child('phase').onValue.map((event) {
+      final v = event.snapshot.value;
+      return (v ?? '').toString();
+    });
+  }
+
+  Stream<Map<String, String>> watchPlayerTags(String roomCode) {
+    return roomRef(roomCode).child('playerTags').onValue.map((event) {
       final raw = event.snapshot.value;
+      final out = <String, String>{};
       if (raw is Map) {
-        return raw.map((k, v) => MapEntry(k.toString(), v));
+        raw.forEach((k, v) {
+          out[k.toString()] = v.toString();
+        });
       }
-      return <String, dynamic>{};
+      return out;
     });
   }
 }
